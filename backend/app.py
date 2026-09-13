@@ -1,6 +1,6 @@
 """
-Developer B — Flask App Skeleton (Module B1)
-=============================================
+Developer B — Flask App Skeleton (Module B1 → updated B2)
+==========================================================
 This is Developer B's skeleton Flask application for SIH26162 - AI Detection &
 Classification of Industrial Fires.
 
@@ -21,7 +21,7 @@ INTEGRATION NOTE:
 
 Routes defined here:
   GET /                   — Serves the React/HTML dashboard shell (frontend/index.html)
-  GET /video_feed         — Placeholder; MJPEG streaming implemented in next module
+  GET /video_feed         — MJPEG stream with mock-detection overlays (Module B2)
   GET /latest_detection   — Returns the most recent detection as JSON
 """
 
@@ -29,6 +29,8 @@ import os
 import time
 from datetime import datetime
 
+import cv2
+import numpy as np
 from flask import Flask, Response, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -43,7 +45,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------------------------------------------------------
-# Mock detection — TEMPORARY, replaces Developer A's run_pipeline() later
+# Path helpers
 # ---------------------------------------------------------------------------
 
 # Absolute path to the frontend/ directory, resolved relative to this file's
@@ -53,6 +55,15 @@ CORS(app)
 _FRONTEND_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "frontend")
 )
+
+# Absolute path to sample_videos/ at the repo root.
+_SAMPLE_VIDEOS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "sample_videos")
+)
+
+# ---------------------------------------------------------------------------
+# Mock detection — TEMPORARY, replaces Developer A's run_pipeline() later
+# ---------------------------------------------------------------------------
 
 
 def mock_detect() -> dict:
@@ -90,6 +101,187 @@ def mock_detect() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Video source detection (Module B2)
+# ---------------------------------------------------------------------------
+
+# Overlay colour palette (OpenCV uses BGR, not RGB).
+_SEVERITY_COLORS = {
+    "Low":    (0, 255,   0),   # green
+    "Medium": (0, 165, 255),   # orange
+    "High":   (0,   0, 255),   # red
+}
+_DEFAULT_OVERLAY_COLOR = (0, 165, 255)  # orange for unknown/unexpected severity
+
+
+def get_video_source():
+    """
+    Locate a sample video file or fall back to the system webcam.
+
+    Checks _SAMPLE_VIDEOS_DIR for files ending in .mp4, .avi, or .mov
+    (case-insensitive).  Returns the alphabetically first match as a string
+    path, or integer 0 (default webcam index) if none are found.
+
+    Prints its decision to stdout so it is visible in the Flask dev-server log.
+    """
+    video_extensions = (".mp4", ".avi", ".mov")
+
+    if os.path.isdir(_SAMPLE_VIDEOS_DIR):
+        candidates = sorted(
+            os.path.join(_SAMPLE_VIDEOS_DIR, f)
+            for f in os.listdir(_SAMPLE_VIDEOS_DIR)
+            if f.lower().endswith(video_extensions)
+        )
+        if candidates:
+            chosen = candidates[0]
+            print(f"Using sample video: {chosen}")
+            return chosen
+
+    print(
+        "No sample video found in sample_videos/ — "
+        "falling back to webcam index 0"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# MJPEG frame generator (Module B2)
+# ---------------------------------------------------------------------------
+
+
+def _make_error_frame(message: str) -> bytes:
+    """
+    Produce a single black 640x480 JPEG frame with centred red error text.
+    Used as the sole yielded frame when no video source is available.
+    """
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_size, _ = cv2.getTextSize(message, font, 0.8, 2)
+    text_x = (640 - text_size[0]) // 2
+    text_y = (480 + text_size[1]) // 2
+    cv2.putText(frame, message, (text_x, text_y), font, 0.8, (0, 0, 255), 2)
+    _, buf = cv2.imencode(".jpg", frame)
+    return buf.tobytes()
+
+
+def generate_frames():
+    """
+    MJPEG generator.  Yields multipart boundary-wrapped JPEG frames for the
+    /video_feed route.
+
+    Lifecycle:
+    - Opens cv2.VideoCapture once; releases it in a finally block so the
+      camera/file handle is always freed, even on GeneratorExit (client
+      disconnect) or any unhandled exception.
+    - Sample videos loop seamlessly by seeking back to frame 0 on EOF.
+    - Webcam: breaks the loop on a failed read (device unavailable).
+    - Per-frame detection + overlay errors are caught locally so one bad
+      detection dict never kills the stream.
+    - Encoding failures skip the frame silently rather than yielding corrupt
+      bytes.
+    - Sleeps 30 ms per iteration (~30 fps cap) to avoid pinning the CPU.
+    """
+    source = get_video_source()
+    is_file = isinstance(source, str)
+
+    cap = cv2.VideoCapture(source)
+
+    try:
+        if not cap.isOpened():
+            print(
+                f"[generate_frames] cv2.VideoCapture could not open source: {source!r}"
+            )
+            error_bytes = _make_error_frame("NO VIDEO SOURCE AVAILABLE")
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n"
+                + error_bytes
+                + b"\r\n"
+            )
+            return  # end the generator — do not loop
+
+        while True:
+            ret, frame = cap.read()
+
+            # ----------------------------------------------------------------
+            # Handle read failure
+            # ----------------------------------------------------------------
+            if not ret:
+                if is_file:
+                    # Video file ended — loop it back to the beginning for a
+                    # seamless continuous demo display.
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                else:
+                    # Webcam read failed (device disconnected / unavailable).
+                    print(
+                        "[generate_frames] Webcam read failed — "
+                        "stopping stream."
+                    )
+                    break
+
+            # ----------------------------------------------------------------
+            # Detection overlay
+            # ----------------------------------------------------------------
+            try:
+                detection = mock_detect()
+                det_class = detection.get("class", "none")
+                severity = detection.get("severity", "None")
+                confidence = detection.get("confidence", 0.0)
+                bbox = detection.get("bbox", [0, 0, 0, 0])
+
+                if det_class != "none":
+                    x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                    color = _SEVERITY_COLORS.get(severity, _DEFAULT_OVERLAY_COLOR)
+
+                    # Draw bounding box (bbox is [x,y,w,h] → convert to corners)
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+
+                    # Draw label above the box; clamp so it never goes off-screen
+                    label = f"{det_class} | {severity} | {confidence:.2f}"
+                    label_y = max(y - 10, 20)
+                    cv2.putText(
+                        frame, label,
+                        (x, label_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, color, 2,
+                    )
+
+                # If det_class == "none", pass the clean frame through unchanged.
+
+            except Exception as overlay_exc:
+                # One bad detection dict must not kill the stream.
+                print(
+                    f"[generate_frames] Overlay error (frame passed clean): "
+                    f"{overlay_exc!r}"
+                )
+                # frame is still valid — yield it un-annotated below.
+
+            # ----------------------------------------------------------------
+            # JPEG encode and yield
+            # ----------------------------------------------------------------
+            ok, buf = cv2.imencode(".jpg", frame)
+            if not ok:
+                # Encoding failure — skip rather than yield corrupt bytes.
+                continue
+
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n"
+                + buf.tobytes()
+                + b"\r\n"
+            )
+
+            # ~30 fps cap — keeps CPU usage reasonable without throttling the UI
+            time.sleep(0.03)
+
+    finally:
+        # Always release the capture resource, regardless of how the generator
+        # exits (normal return, break, GeneratorExit from client disconnect,
+        # or any unhandled exception propagating out).
+        cap.release()
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -110,14 +302,16 @@ def index():
 @app.route("/video_feed")
 def video_feed():
     """
-    Placeholder route — real MJPEG streaming with OpenCV will be implemented
-    in the next module.  Returning HTTP 200 with plain text so existing tests
-    and pollers don't receive a 404 or 501.
+    MJPEG streaming route (Module B2).
+
+    Returns a multipart/x-mixed-replace response so browsers display a
+    continuous live video feed.  generate_frames() handles source detection,
+    OpenCV capture lifecycle, mock-detection overlays, and graceful error
+    recovery internally.
     """
     return Response(
-        "video_feed placeholder — implemented in next module",
-        status=200,
-        mimetype="text/plain",
+        generate_frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
 
