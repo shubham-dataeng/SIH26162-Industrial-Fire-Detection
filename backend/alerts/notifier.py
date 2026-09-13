@@ -12,12 +12,23 @@ Provides three functions consumed by backend/app.py's generate_frames():
 
   log_alert(event)
       Prints a single formatted console line for every confirmed High
-      transition.  Failure-isolated: a malformed event dict never raises.
+      transition and dispatches a real Twilio SMS if SMS_CONFIGURED is True.
+      Failure-isolated: a malformed event dict or SMS failure never raises
+      and never breaks the console log.
 
   send_email_alert(event)
       STUB ONLY — intentional no-op placeholder for a future optional
       SMTP feature.  Not wired into generate_frames() or any route.
       See docstring for integration guidance when the time comes.
+
+SMS alerting (added 2026-09-13)
+--------------------------------
+Twilio SMS is sent on every Low/Medium/None → High transition, exactly
+once per transition (same gate as the existing console log).  Credentials
+are loaded from a .env file at the repo root via python-dotenv.  If any
+of the four required keys (TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, ALERT_TO)
+are absent or empty, SMS is silently disabled and console logging is
+completely unaffected.
 
 Thread-safety design note
 --------------------------
@@ -42,7 +53,42 @@ only way to prevent a second thread from interleaving its own read between
 our read and our write, and thereby seeing stale "pre-transition" state.
 """
 
+import os
 import threading
+
+from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# Load .env from the repo root (two levels up from this file:
+#   backend/alerts/notifier.py → backend/alerts/ → backend/ → repo root)
+# override=False so real environment variables already set take precedence.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv(os.path.join(_REPO_ROOT, ".env"), override=False)
+
+# ---------------------------------------------------------------------------
+# SMS configuration — read once at import time, never re-read per alert.
+# ---------------------------------------------------------------------------
+_TWILIO_SID   = os.environ.get("TWILIO_SID",   "").strip()
+_TWILIO_TOKEN = os.environ.get("TWILIO_TOKEN",  "").strip()
+_TWILIO_FROM  = os.environ.get("TWILIO_FROM",   "").strip()
+_ALERT_TO     = os.environ.get("ALERT_TO",      "").strip()
+
+# True only if every required key is present and non-empty.
+SMS_CONFIGURED: bool = all([_TWILIO_SID, _TWILIO_TOKEN, _TWILIO_FROM, _ALERT_TO])
+
+# Report startup status — presence only, never credential values.
+if SMS_CONFIGURED:
+    print("[notifier] SMS alerting ACTIVE via Twilio "
+          "(TWILIO_SID=PRESENT, TWILIO_TOKEN=PRESENT, "
+          "TWILIO_FROM=PRESENT, ALERT_TO=PRESENT)")
+else:
+    _missing = [k for k, v in {
+        "TWILIO_SID": _TWILIO_SID, "TWILIO_TOKEN": _TWILIO_TOKEN,
+        "TWILIO_FROM": _TWILIO_FROM, "ALERT_TO": _ALERT_TO,
+    }.items() if not v]
+    print(f"[notifier] SMS alerting DISABLED — missing or empty keys: {_missing}")
+
 
 # ---------------------------------------------------------------------------
 # Module-level shared state — protected by _lock
@@ -58,7 +104,7 @@ _last_severity: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# maybe_alert — the core transition detector
+# maybe_alert — the core transition detector (UNCHANGED from original)
 # ---------------------------------------------------------------------------
 
 def maybe_alert(current_severity: str) -> bool:
@@ -101,12 +147,71 @@ def maybe_alert(current_severity: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# log_alert — console output for confirmed High transitions
+# send_sms_alert — Twilio SMS dispatch for confirmed High transitions
+# ---------------------------------------------------------------------------
+
+def send_sms_alert(event: dict) -> None:
+    """
+    Send a Twilio SMS for a confirmed High-severity transition.
+
+    No-ops immediately if SMS_CONFIGURED is False (missing .env keys).
+    Must never raise — any exception is caught and printed here so that
+    the caller (log_alert) is never disrupted.
+
+    Parameters
+    ----------
+    event : dict
+        The 5-field detection contract dict:
+        {"timestamp", "class", "confidence", "bbox", "severity"}
+    """
+    if not SMS_CONFIGURED:
+        return
+
+    try:
+        confidence = float(event.get("confidence", 0))
+        timestamp  = event.get("timestamp", "unknown")
+
+        body = (
+            f"🔥 FIRE ALERT - SIH26162\n"
+            f"Severity: HIGH\n"
+            f"Confidence: {confidence * 100:.0f}%\n"
+            f"Time: {timestamp}\n"
+            f"Action Required: Evacuate and contact emergency services."
+        )
+
+        from twilio.rest import Client  # import here keeps startup fast when disabled
+        client = Client(_TWILIO_SID, _TWILIO_TOKEN)
+        message = client.messages.create(
+            body=body,
+            from_=_TWILIO_FROM,
+            to=_ALERT_TO,
+        )
+        print(f"[notifier] SMS sent successfully (SID: {message.sid})")
+
+    except Exception as exc:
+        # Check for Twilio's unverified-recipient error specifically.
+        exc_str = str(exc)
+        if "unverified" in exc_str.lower() or "21608" in exc_str:
+            print(
+                "[notifier] SMS failed: recipient number is not verified in your "
+                "Twilio trial account — verify it at https://console.twilio.com"
+            )
+        else:
+            # Generic failure: show type + short reason, never credential values.
+            print(f"[notifier] SMS failed: {type(exc).__name__} — {exc_str[:120]}")
+
+
+# ---------------------------------------------------------------------------
+# log_alert — console output + SMS for confirmed High transitions
 # ---------------------------------------------------------------------------
 
 def log_alert(event: dict) -> None:
     """
-    Print a formatted alert line to stdout for a confirmed High transition.
+    Print a formatted alert line to stdout for a confirmed High transition,
+    then attempt to send an SMS via send_sms_alert().
+
+    The SMS call is wrapped in its own try/except so any SMS failure can
+    never silence or break the console log that was already working.
 
     Uses event["timestamp"] and event["confidence"] from the 5-field
     detection contract.  Wrapped in try/except so a malformed or incomplete
@@ -126,9 +231,15 @@ def log_alert(event: dict) -> None:
         print(f"🔥 ALERT: severity transitioned to HIGH "
               f"(could not format event details: {exc!r})")
 
+    # SMS dispatch — isolated so it can never affect the console log above.
+    try:
+        send_sms_alert(event)
+    except Exception as exc:
+        print(f"[notifier] Unexpected error in send_sms_alert: {exc!r}")
+
 
 # ---------------------------------------------------------------------------
-# send_email_alert — STUB for future optional SMTP feature
+# send_email_alert — STUB for future optional SMTP feature (UNCHANGED)
 # ---------------------------------------------------------------------------
 
 def send_email_alert(event: dict) -> None:

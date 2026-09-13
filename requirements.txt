@@ -48,3 +48,6 @@ ultralytics-platform==0.1.40
 ultralytics-thop==2.1.6
 urllib3==2.7.0
 Werkzeug==3.1.8
+# SMS alerting — added for Twilio High-severity transition alerts (B5 notifier)
+python-dotenv==1.2.3
+twilio==9.11.1
