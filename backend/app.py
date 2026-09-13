@@ -26,10 +26,11 @@ INTEGRATION (Phase 8):
     }
 
 Routes:
-  GET /                   — Dashboard shell (frontend/index.html)
-  GET /video_feed         — MJPEG stream with real/mock overlays
-  GET /latest_detection   — Single detection JSON from shared _latest_state
-  GET /events             — 20 most recent persisted events
+  GET  /                   — Dashboard shell (frontend/index.html)
+  GET  /video_feed         — MJPEG stream with real/mock overlays
+  GET  /latest_detection   — Single detection JSON from shared _latest_state
+  GET  /events             — 20 most recent persisted events
+  POST /switch_video       — Hot-swap active video source ({"video": "N.mp4"})
 """
 
 import os
@@ -40,7 +41,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 # ---------------------------------------------------------------------------
@@ -102,6 +103,19 @@ _state_lock = threading.Lock()
 _latest_state: dict = {"detections": [], "updated_at": None}
 # Tracks per-frame inference status (Phase 12): True if real pipeline succeeded on last frame, False if fallen back to mock.
 _last_frame_was_real: bool = REAL_PIPELINE_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# Shared video capture — lifted out of generate_frames() so POST /switch_video
+# can hot-swap the source without restarting the streaming generator.
+#
+# _cap_lock guards both _cap and _cap_is_file.  generate_frames() acquires it
+# briefly per frame (just long enough to call cap.read()); /switch_video holds
+# it only during the release + re-open sequence, so contention is minimal.
+# ---------------------------------------------------------------------------
+_cap_lock = threading.Lock()
+_cap: cv2.VideoCapture | None = None        # initialised in generate_frames()
+_cap_is_file: bool = True                   # True → loop on EOF; False → webcam
+
 
 
 # Severity ordering used by pick_primary_detection() and overall_severity().
@@ -230,6 +244,7 @@ def get_frame_detections(frame) -> list:
 
     Returns list[dict] — always.  May be empty.
     """
+    global _last_frame_was_real
     if REAL_PIPELINE_AVAILABLE and _run_pipeline is not None:
         try:
             results = _run_pipeline(frame)
@@ -339,22 +354,31 @@ def generate_frames():
       6. Encode and yield the annotated JPEG.
 
     All error-handling patterns from B2/B4/B5 are preserved:
-    - cap.release() in finally regardless of how the generator exits.
+    - _cap.release() in finally regardless of how the generator exits.
     - Video file EOF → seek to frame 0 for seamless looping.
     - Webcam read failure → break with log.
     - Per-frame detection/draw block isolated in try/except.
     - insert_event wrapped in its own independent try/except.
     - Notifier wrapped in its own independent try/except.
     - JPEG encode failure → continue (skip frame, no corrupt bytes yielded).
+
+    Source hot-swap (POST /switch_video):
+    - _cap and _cap_is_file are module-level, guarded by _cap_lock.
+    - This generator initialises _cap once at startup (if not already open).
+    - /switch_video releases the old _cap and opens a new one under _cap_lock;
+      the next cap.read() call in this loop picks up the new source seamlessly.
     """
-    source = get_video_source()
-    is_file = isinstance(source, str)
+    global _cap, _cap_is_file
 
-    cap = cv2.VideoCapture(source)
+    # Initialise the shared capture on first client connection.
+    with _cap_lock:
+        if _cap is None or not _cap.isOpened():
+            source = get_video_source()
+            _cap_is_file = isinstance(source, str)
+            _cap = cv2.VideoCapture(source)
 
-    try:
-        if not cap.isOpened():
-            print(f"[generate_frames] cv2.VideoCapture could not open source: {source!r}")
+        if not _cap.isOpened():
+            print(f"[generate_frames] cv2.VideoCapture could not open initial source")
             error_bytes = _make_error_frame("NO VIDEO SOURCE AVAILABLE")
             yield (
                 b"--frame\r\n"
@@ -364,15 +388,27 @@ def generate_frames():
             )
             return
 
+    try:
         while True:
-            ret, frame = cap.read()
+            # ----------------------------------------------------------------
+            # Read one frame under _cap_lock — /switch_video may swap _cap
+            # between iterations; we always read from whatever is current.
+            # ----------------------------------------------------------------
+            with _cap_lock:
+                ret, frame = _cap.read()
+                is_file = _cap_is_file
+                if not ret and is_file:
+                    # EOF — loop the file; do this inside the lock so the
+                    # seek and read happen atomically with respect to the lock.
+                    _cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = _cap.read()
 
             # ----------------------------------------------------------------
             # Handle read failure
             # ----------------------------------------------------------------
             if not ret:
                 if is_file:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    # Shouldn't reach here (already tried above), but be safe.
                     continue
                 else:
                     print("[generate_frames] Webcam read failed — stopping stream.")
@@ -464,8 +500,12 @@ def generate_frames():
             time.sleep(0.03)
 
     finally:
-        # Always release — even on GeneratorExit (client disconnect).
-        cap.release()
+        # Do NOT release _cap here — /switch_video may still be using it,
+        # and other clients could reconnect.  The cap lives for the app's
+        # lifetime; explicit teardown would require an atexit handler.
+        pass
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +572,79 @@ def latest_detection():
         }
     return jsonify(result)
 
+
+
+# Exact set of filenames the switcher will accept — nothing else passes.
+_ALLOWED_VIDEOS = {"1.mp4", "2.mp4", "3.mp4"}
+
+
+@app.route("/switch_video", methods=["POST"])
+def switch_video():
+    """
+    Hot-swap the active MJPEG video source.
+
+    Request body (JSON):
+        {"video": "1.mp4"}   # must be one of _ALLOWED_VIDEOS
+
+    Security: only _ALLOWED_VIDEOS filenames are accepted — no path
+    separators, no arbitrary filenames.  os.path.basename is applied as a
+    belt-and-suspenders guard even though the allowlist already prevents
+    traversal.
+
+    Thread safety: acquires _cap_lock to atomically release the old capture
+    and open the new one.  generate_frames() holds _cap_lock only for the
+    duration of a single cap.read() call, so this blocks for at most one
+    frame (~33 ms at 30 fps).
+
+    Response:
+        200  {"status": "ok",    "video": "<filename>"}
+        400  {"status": "error", "message": "<reason>"}
+        500  {"status": "error", "message": "<reason>"}
+    """
+    global _cap, _cap_is_file
+
+    data = request.get_json(silent=True)
+    if not data or "video" not in data:
+        return jsonify({"status": "error", "message": "JSON body with 'video' key required"}), 400
+
+    # Belt-and-suspenders: strip any directory component before allowlist check.
+    requested = os.path.basename(str(data["video"]))
+
+    if requested not in _ALLOWED_VIDEOS:
+        return jsonify({
+            "status": "error",
+            "message": f"Invalid video '{requested}'. Must be one of: {sorted(_ALLOWED_VIDEOS)}",
+        }), 400
+
+    new_path = os.path.join(_SAMPLE_VIDEOS_DIR, requested)
+    if not os.path.isfile(new_path):
+        return jsonify({
+            "status": "error",
+            "message": f"Video file not found on server: {requested}",
+        }), 400
+
+    try:
+        with _cap_lock:
+            # Release the old capture before opening the new one to free
+            # the file descriptor promptly (important on some OS/drivers).
+            if _cap is not None:
+                _cap.release()
+
+            _cap = cv2.VideoCapture(new_path)
+            _cap_is_file = True  # all allowed videos are files, not webcams
+
+            if not _cap.isOpened():
+                return jsonify({
+                    "status": "error",
+                    "message": f"cv2.VideoCapture failed to open: {requested}",
+                }), 500
+
+        print(f"[switch_video] Source switched to: {new_path!r}")
+        return jsonify({"status": "ok", "video": requested}), 200
+
+    except Exception as exc:
+        print(f"[switch_video] Unexpected error: {exc!r}")
+        return jsonify({"status": "error", "message": "Internal error during source switch"}), 500
 
 
 @app.route("/events")

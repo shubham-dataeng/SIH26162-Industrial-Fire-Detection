@@ -17,6 +17,24 @@
       <!-- LEFT: Video panel -->
       <section class="panel video-panel" aria-label="Live video feed">
         <h2>Live Feed</h2>
+
+        <!-- Video source switcher — buttons POST to /switch_video -->
+        <div class="video-switcher" role="group" aria-label="Video source">
+          <span class="label">Video Source</span>
+          <div class="switcher-buttons">
+            <button class="switcher-btn active" data-video="1.mp4" aria-pressed="true">
+              🔥 Fire Test
+            </button>
+            <button class="switcher-btn" data-video="2.mp4" aria-pressed="false">
+              🍳 Cooking Fire
+            </button>
+            <button class="switcher-btn" data-video="3.mp4" aria-pressed="false">
+              🌅 No Fire (Sunset)
+            </button>
+          </div>
+          <span id="switcher-status" class="switcher-status" aria-live="polite"></span>
+        </div>
+
         <div class="video-wrapper">
           <img
             id="video-feed"
@@ -25,6 +43,7 @@
           />
         </div>
       </section>
+
 
       <!-- RIGHT: Status panel -->
       <section class="panel status-panel" aria-label="Detection status">

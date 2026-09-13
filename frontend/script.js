@@ -217,4 +217,71 @@ function startPolling() {
    ========================================================================== */
 document.addEventListener("DOMContentLoaded", () => {
   startPolling();
+  initVideoSwitcher();
 });
+
+/* ==========================================================================
+   Video-source switcher
+   Sends POST /switch_video and forces the MJPEG <img> to reload its src so
+   the browser drops the old stream and reconnects to the new one immediately.
+   ========================================================================== */
+function initVideoSwitcher() {
+  const buttons       = document.querySelectorAll(".switcher-btn");
+  const statusEl      = document.getElementById("switcher-status");
+  const videoFeedImg  = document.getElementById("video-feed");
+
+  if (!buttons.length || !videoFeedImg) return;
+
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const video = btn.dataset.video;
+      if (!video) return;
+
+      // Disable all buttons while the request is in flight.
+      buttons.forEach((b) => (b.disabled = true));
+      statusEl.textContent = "Switching…";
+      statusEl.className   = "switcher-status";
+
+      try {
+        const res = await fetch("/switch_video", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ video }),
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.status === "ok") {
+          // Update active button state.
+          buttons.forEach((b) => {
+            b.classList.toggle("active", b === btn);
+            b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+          });
+
+          // Force the MJPEG img to reconnect: append a cache-buster so the
+          // browser treats it as a new request and drops the previous stream.
+          const base = videoFeedImg.src.split("?")[0];
+          videoFeedImg.src = `${base}?t=${Date.now()}`;
+
+          statusEl.textContent = `✓ Now showing: ${btn.textContent.trim()}`;
+          statusEl.className   = "switcher-status ok";
+        } else {
+          statusEl.textContent = `✗ ${data.message || "Switch failed"}`;
+          statusEl.className   = "switcher-status error";
+        }
+      } catch (err) {
+        console.warn("[switcher] fetch error:", err);
+        statusEl.textContent = "✗ Network error — could not switch source";
+        statusEl.className   = "switcher-status error";
+      } finally {
+        // Re-enable all buttons.
+        buttons.forEach((b) => (b.disabled = false));
+        // Clear the status message after 3 s.
+        setTimeout(() => {
+          statusEl.textContent = "";
+          statusEl.className   = "switcher-status";
+        }, 3000);
+      }
+    });
+  });
+}

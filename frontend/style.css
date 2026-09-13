@@ -141,8 +141,75 @@ header h1 {
 }
 
 /* --------------------------------------------------------------------------
-   Status panel — generic status blocks
+   Video-source switcher
    -------------------------------------------------------------------------- */
+.video-switcher {
+  margin-bottom: 0.85rem;
+}
+
+.video-switcher .label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 0.45rem;
+}
+
+.switcher-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.switcher-btn {
+  /* Base appearance — sits in the panel bg, outlined with border */
+  background: #1e2330;
+  color: var(--text-secondary);
+  border: 1px solid var(--bg-panel-border);
+  border-radius: var(--radius);
+  padding: 0.38rem 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.switcher-btn:hover {
+  background: #252b3b;
+  color: var(--text-primary);
+  border-color: #3a4257;
+}
+
+/* Active / selected source */
+.switcher-btn.active {
+  background: rgba(41, 121, 255, 0.15);
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.switcher-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Inline status feedback below the buttons */
+.switcher-status {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  min-height: 1em;   /* prevents layout jump when text appears/disappears */
+  transition: color 0.2s ease;
+}
+
+.switcher-status.ok    { color: var(--clr-low-text);    }
+.switcher-status.error { color: var(--clr-high-text);   }
+
+
 .status-block {
   margin-bottom: var(--gap);
 }
