@@ -1,6 +1,6 @@
 """
-Developer B — Flask App Skeleton (Module B1 → updated B2)
-==========================================================
+Developer B — Flask App Skeleton (Module B1 → updated B2 → updated B4)
+=======================================================================
 This is Developer B's skeleton Flask application for SIH26162 - AI Detection &
 Classification of Industrial Fires.
 
@@ -23,9 +23,11 @@ Routes defined here:
   GET /                   — Serves the React/HTML dashboard shell (frontend/index.html)
   GET /video_feed         — MJPEG stream with mock-detection overlays (Module B2)
   GET /latest_detection   — Returns the most recent detection as JSON
+  GET /events             — Returns the 20 most recent persisted detection events (Module B4)
 """
 
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -33,6 +35,28 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, send_from_directory
 from flask_cors import CORS
+
+# ---------------------------------------------------------------------------
+# Import path fix for backend/database/db.py (Module B4)
+# ---------------------------------------------------------------------------
+# When this app is launched as `flask --app backend/app run` from the repo
+# root, Flask adds the repo root to sys.path.  `from database.db import ...`
+# would then look for a top-level `database` package — which does not exist
+# at the repo root; it lives inside `backend/`.
+#
+# When launched as `python backend/app.py`, Python adds the script's own
+# directory (backend/) to sys.path[0], so `from database.db import ...` DOES
+# resolve correctly — but only in that case.
+#
+# The robust solution: unconditionally ensure the backend/ directory is in
+# sys.path before the import, using __file__ (always points to backend/app.py
+# regardless of the CWD or launch method).  The `if ... not in` guard
+# prevents duplicate path entries on re-import or interactive reloaders.
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+from database.db import get_recent_events, insert_event  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -229,6 +253,22 @@ def generate_frames():
                 confidence = detection.get("confidence", 0.0)
                 bbox = detection.get("bbox", [0, 0, 0, 0])
 
+                # ---- Persist detection event (Module B4) -------------------
+                # Insert BEFORE drawing the overlay so logging and rendering
+                # are decoupled — a draw failure cannot suppress a log entry.
+                # Only log non-"none" detections: empty frames are not events.
+                # Belt-and-suspenders try/except wraps insert_event's own
+                # internal guard so a logging failure can NEVER interrupt the
+                # video stream under any circumstances.
+                if det_class != "none":
+                    try:
+                        insert_event(detection)
+                    except Exception as db_exc:
+                        print(
+                            f"[generate_frames] insert_event raised unexpectedly "
+                            f"(stream continues): {db_exc!r}"
+                        )
+
                 if det_class != "none":
                     x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
                     color = _SEVERITY_COLORS.get(severity, _DEFAULT_OVERLAY_COLOR)
@@ -338,6 +378,27 @@ def latest_detection():
             "bbox": [0, 0, 0, 0],
             "severity": "None",
         }
+    return jsonify(result)
+
+
+@app.route("/events")
+def events():
+    """
+    Return the 20 most recent persisted detection events as JSON (Module B4).
+
+    Calls get_recent_events() from backend/database/db.py.  On any failure
+    (database unavailable, corrupt data, etc.) returns an empty list with
+    HTTP 200 — a read failure must never 500 the dashboard.
+
+    Row order: newest first (ORDER BY id DESC in the query).
+    """
+    try:
+        result = get_recent_events(20)
+    except Exception as exc:
+        # Should never reach here (get_recent_events has its own guard), but
+        # belt-and-suspenders at the HTTP boundary.
+        print(f"[events] get_recent_events raised unexpectedly: {exc!r}")
+        result = []
     return jsonify(result)
 
 
