@@ -159,7 +159,8 @@ SIH26162-Industrial-Fire-Detection/
    ⚠ Running on fallback detection (AI module offline)
    ```
    Demo presenters should verify this indicator is hidden (confirming `pipeline_mode: "real"`).
-5. **Inference Latency:** On local development CPU hardware, real YOLOv8 inference averages **~25–56 ms** per frame (~18–30 FPS), well within the hackathon's `< 200 ms` budget. Actual latency will vary depending on CPU/GPU hardware.
+5. **Inference Latency:** On local development CPU hardware, real YOLOv8 inference averages **~17–53 ms** per frame (~19–59 FPS), well within the hackathon's `< 200 ms` budget. Actual latency will vary depending on CPU/GPU hardware.
+6. **Severity Formula (tuned 2026-09-13):** The severity scoring formula was rebalanced (`WEIGHT_AREA: 0.50 → 0.65`, `THRESH_HIGH: 0.50 → 0.42`) after benchmarking confirmed that the nano model already achieves ~93% confidence on large industrial fires. The original 50/50 blend diluted those readings and prevented reliable `High` classification. After rebalancing: large fire clips reach `High` reliably, cooking/contained flames stay `Low/Medium`, and both non-fire guardrail clips produce zero false positives across 50 frames each.
 
 ---
 

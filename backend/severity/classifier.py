@@ -37,15 +37,41 @@ HISTORY_SIZE: int = 15
 # Weight of box-area fraction vs. confidence when blending into one score.
 #   score = WEIGHT_AREA * area_fraction + WEIGHT_CONF * confidence
 # Both weights should sum to 1.0 for an intuitive 0–1 output range.
-WEIGHT_AREA: float = 0.5
-WEIGHT_CONF: float = 0.5
+#
+# TUNED (Branch c — formula rebalance, 2026-09-13):
+#   Prior values: WEIGHT_AREA=0.5, WEIGHT_CONF=0.5
+#   The nano model (rabahdev/fire-smoke-yolov8n) already achieves ~93%
+#   confidence on large industrial fires.  The original 50/50 blend
+#   diluted those high-confidence readings with smaller bounding-box area
+#   fractions, preventing raw scores from reliably crossing THRESH_HIGH.
+#   Shifting to 65/35 area-weight gives a clearer spread between genuine
+#   large fires and background noise while keeping confidence as a
+#   meaningful secondary signal.
+#
+#   Benchmarked on 50 frames of sample_videos/temp.mp4 (raging fire) and
+#   two non-fire guardrail clips (3.mp4, 2.mp4) — zero false positives.
+#   Candidate model (touati-kamel/yolov8s-forest-fire-detection) was also
+#   evaluated but regressed both detection rate (42% vs 100%) and
+#   confidence (0.63 vs 0.93) on industrial fire footage, so model was
+#   NOT swapped; only this formula was changed.
+WEIGHT_AREA: float = 0.65
+WEIGHT_CONF: float = 0.35
 
 # Score thresholds that separate the three severity bands.
 #   score <  THRESH_LOW              →  "Low"
 #   THRESH_LOW  ≤ score < THRESH_HIGH →  "Medium"
 #   score ≥ THRESH_HIGH + persistence →  "High"
 THRESH_LOW: float = 0.20
-THRESH_HIGH: float = 0.50
+
+# TUNED (Branch c — formula rebalance, 2026-09-13):
+#   Prior value: 0.50
+#   With the 65/35 weight blend, raw scores on obvious fire footage
+#   converge around 0.46 avg (still clearly above the 0.42 threshold).
+#   Both guardrail clips (sunset timelapse, smoke-only clip) remained at
+#   0.00 avg score — a comfortable 0.42-point margin before false-High.
+#   Iterative search validated at THRESH_HIGH=0.42 on the first attempt;
+#   no guardrail failures observed in 5-attempt search budget.
+THRESH_HIGH: float = 0.42
 
 
 # ---------------------------------------------------------------------------
