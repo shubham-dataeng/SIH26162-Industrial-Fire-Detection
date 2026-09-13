@@ -1,5 +1,5 @@
 """
-Developer B — Flask App Skeleton (Module B1 → updated B2 → updated B4)
+Developer B — Flask App Skeleton (Module B1 → updated B2 → updated B4 → updated B5)
 =======================================================================
 This is Developer B's skeleton Flask application for SIH26162 - AI Detection &
 Classification of Industrial Fires.
@@ -57,6 +57,10 @@ if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
 from database.db import get_recent_events, insert_event  # noqa: E402
+# Reusing the same _BACKEND_DIR sys.path pattern established above (B4):
+# backend/ is already on sys.path, so `from alerts.notifier import ...`
+# resolves identically to `from database.db import ...` — no new path work needed.
+from alerts.notifier import log_alert, maybe_alert  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -268,6 +272,24 @@ def generate_frames():
                             f"[generate_frames] insert_event raised unexpectedly "
                             f"(stream continues): {db_exc!r}"
                         )
+
+                # ---- Server-side alert notification (Module B5) ------------
+                # Independent try/except — completely separate from the
+                # insert_event guard above.  A notifier failure must not
+                # affect DB logging, and a DB failure must not suppress
+                # the alert.  Both are independent safety layers.
+                # maybe_alert() is called on every detection (not gated on
+                # det_class != "none") so the transition tracker correctly
+                # sees "None" severity frames and resets the High-transition
+                # latch when the quiet phase returns.
+                try:
+                    if maybe_alert(severity):
+                        log_alert(detection)
+                except Exception as alert_exc:
+                    print(
+                        f"[generate_frames] Notifier raised unexpectedly "
+                        f"(stream continues): {alert_exc!r}"
+                    )
 
                 if det_class != "none":
                     x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
