@@ -1,33 +1,40 @@
 """
-Developer B — Flask App Skeleton (Module B1 → updated B2 → updated B4 → updated B5)
-=======================================================================
-This is Developer B's skeleton Flask application for SIH26162 - AI Detection &
+Developer B — Flask App (B1→B2→B4→B5→Integration)
+===================================================
+This is Developer B's Flask application for SIH26162 - AI Detection &
 Classification of Industrial Fires.
 
-INTEGRATION NOTE:
-  The function `mock_detect()` below is a *temporary stand-in* for Developer A's
-  real inference pipeline.  During the Integration phase, `mock_detect()` will be
-  replaced by a call to Developer A's `run_pipeline()` (from backend/inference/).
-  The 5-field response contract returned by this function MUST NOT change without
-  explicit agreement from both developers:
+INTEGRATION (Phase 8):
+  The real AI pipeline is Developer A's `run_pipeline(frame)` from
+  backend/inference/detect.py.  It returns list[dict] with the 5-field
+  contract below.  Integration is wrapped in a startup try/except so the
+  app still boots and runs on mock data if ultralytics/weights are absent.
 
-      {
-          "timestamp":  str   (ISO 8601, e.g. "2026-09-13T17:12:06.123456"),
-          "class":      str   ("fire" | "smoke" | "none"),
-          "confidence": float (0.0 – 1.0),
-          "bbox":       list[int]  ([x, y, w, h]; [0,0,0,0] when class is "none"),
-          "severity":   str   ("Low" | "Medium" | "High" | "None"),
-      }
+  The normalisation layer `get_frame_detections(frame)` is the single call
+  site for either the real pipeline or the mock fallback.  generate_frames()
+  calls it once per frame and writes the result into `_latest_state` so that
+  GET /latest_detection reads EXACTLY what the video stream is processing —
+  no duplicate or inconsistent inference calls.
 
-Routes defined here:
-  GET /                   — Serves the React/HTML dashboard shell (frontend/index.html)
-  GET /video_feed         — MJPEG stream with mock-detection overlays (Module B2)
-  GET /latest_detection   — Returns the most recent detection as JSON
-  GET /events             — Returns the 20 most recent persisted detection events (Module B4)
+5-FIELD SHARED CONTRACT (must not change without agreement from both devs):
+    {
+        "timestamp":  str   (ISO 8601, e.g. "2026-09-13T17:12:06.123456"),
+        "class":      str   ("fire" | "smoke" | "none"),
+        "confidence": float (0.0 – 1.0),
+        "bbox":       list[int]  ([x, y, w, h]; [0,0,0,0] when class is "none"),
+        "severity":   str   ("Low" | "Medium" | "High" | "None"),
+    }
+
+Routes:
+  GET /                   — Dashboard shell (frontend/index.html)
+  GET /video_feed         — MJPEG stream with real/mock overlays
+  GET /latest_detection   — Single detection JSON from shared _latest_state
+  GET /events             — 20 most recent persisted events
 """
 
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -37,79 +44,121 @@ from flask import Flask, Response, jsonify, send_from_directory
 from flask_cors import CORS
 
 # ---------------------------------------------------------------------------
-# Import path fix for backend/database/db.py (Module B4)
+# sys.path fix — established in Module B4, reused identically here.
+# _BACKEND_DIR (backend/) is inserted so that sibling packages
+# `database`, `alerts`, and `inference` all resolve via the same mechanism.
 # ---------------------------------------------------------------------------
-# When this app is launched as `flask --app backend/app run` from the repo
-# root, Flask adds the repo root to sys.path.  `from database.db import ...`
-# would then look for a top-level `database` package — which does not exist
-# at the repo root; it lives inside `backend/`.
-#
-# When launched as `python backend/app.py`, Python adds the script's own
-# directory (backend/) to sys.path[0], so `from database.db import ...` DOES
-# resolve correctly — but only in that case.
-#
-# The robust solution: unconditionally ensure the backend/ directory is in
-# sys.path before the import, using __file__ (always points to backend/app.py
-# regardless of the CWD or launch method).  The `if ... not in` guard
-# prevents duplicate path entries on re-import or interactive reloaders.
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
 from database.db import get_recent_events, insert_event  # noqa: E402
-# Reusing the same _BACKEND_DIR sys.path pattern established above (B4):
-# backend/ is already on sys.path, so `from alerts.notifier import ...`
-# resolves identically to `from database.db import ...` — no new path work needed.
+# Reusing the same _BACKEND_DIR sys.path pattern established in B4:
 from alerts.notifier import log_alert, maybe_alert  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# STEP 1 — Safe import of the real AI pipeline with startup fallback.
+# Same sys.path pattern as database/alerts above (backend/ already on path).
+# ---------------------------------------------------------------------------
+REAL_PIPELINE_AVAILABLE: bool = False
+_run_pipeline = None  # holds the callable if import succeeds
+
+try:
+    from inference.detect import run_pipeline as _run_pipeline  # noqa: E402
+    REAL_PIPELINE_AVAILABLE = True
+    print("[app] Real AI pipeline loaded: inference.detect.run_pipeline")
+except Exception as _import_err:
+    print(f"[app] Real AI pipeline unavailable — running on mock detections only: {_import_err!r}")
 
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
-
-# Enable CORS globally so the dashboard (served on a different port during
-# development, or via fetch() in the browser) can poll /latest_detection freely.
 CORS(app)
 
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
 
-# Absolute path to the frontend/ directory, resolved relative to this file's
-# location so it works regardless of the working directory from which Flask is
-# launched (e.g., `flask --app backend/app run` from repo root, or
-# `python backend/app.py` directly).
 _FRONTEND_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "frontend")
 )
 
-# Absolute path to sample_videos/ at the repo root.
 _SAMPLE_VIDEOS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "sample_videos")
 )
 
 # ---------------------------------------------------------------------------
-# Mock detection — TEMPORARY, replaces Developer A's run_pipeline() later
+# STEP 3 — Shared per-frame state
 # ---------------------------------------------------------------------------
 
+# Protected by _state_lock so generate_frames() (writer, in the /video_feed
+# thread) and latest_detection() (reader, in its own HTTP thread) never race.
+# This is a SEPARATE lock from notifier.py's _lock — do not conflate them.
+_state_lock = threading.Lock()
+_latest_state: dict = {"detections": [], "updated_at": None}
+
+# Severity ordering used by pick_primary_detection() and overall_severity().
+_SEVERITY_RANK: dict[str, int] = {"High": 3, "Medium": 2, "Low": 1, "None": 0}
+
+
+def pick_primary_detection(detections: list) -> dict:
+    """
+    Choose the single most significant detection from the list to represent
+    the current frame in GET /latest_detection.
+
+    Returns the item with the highest severity (High > Medium > Low > None).
+    Ties are broken by first occurrence (stable sort behaviour).
+    Returns a safe "none"-shaped dict if the list is empty, so the downstream
+    consumer always gets a well-formed object without null-checking.
+    """
+    if not detections:
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "class": "none",
+            "confidence": 0.0,
+            "bbox": [0, 0, 0, 0],
+            "severity": "None",
+        }
+    # max() with key is stable on equal keys (Python spec), so first-occurrence
+    # wins on ties — no explicit index tracking needed.
+    return max(detections, key=lambda d: _SEVERITY_RANK.get(d.get("severity", "None"), 0))
+
+
+def overall_severity(detections: list) -> str:
+    """
+    Return the highest severity string across all detections in the list.
+    Returns "None" for an empty list.
+    Used to feed maybe_alert() with a frame-level severity value.
+    """
+    if not detections:
+        return "None"
+    return max(
+        (d.get("severity", "None") for d in detections),
+        key=lambda s: _SEVERITY_RANK.get(s, 0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mock detection — kept for the fallback path in get_frame_detections().
+# mock_detect() itself is unchanged so it continues to serve GET /latest_detection
+# correctly during mock-only operation via _latest_state.
+# ---------------------------------------------------------------------------
 
 def mock_detect() -> dict:
     """
-    Simulate Developer A's detection output using a deterministic 8-second cycle.
+    Deterministic 8-second cycle mock (unchanged from previous modules).
 
-    Cycle (based on time.time() % 8):
-      [0, 4)  -> class="none"  / severity="None"   (quiet period)
-      [4, 8)  -> class="fire"  / severity="High"   (fire detected)
+    Cycle:
+      [0, 4)  → class="none"  / severity="None"
+      [4, 8)  → class="fire"  / confidence=0.91 / severity="High"
 
-    Returns a dict matching the 5-field shared contract exactly.
-    This function will be removed and replaced by Developer A's run_pipeline()
-    during the Integration phase.
+    Returns a single dict matching the 5-field contract.
     """
-    phase = time.time() % 8  # value in [0, 8)
+    phase = time.time() % 8
 
     if phase < 4:
-        # Quiet period — nothing detected
         return {
             "timestamp": datetime.now().isoformat(),
             "class": "none",
@@ -118,7 +167,6 @@ def mock_detect() -> dict:
             "severity": "None",
         }
     else:
-        # Fire detected — fixed representative values for mock
         return {
             "timestamp": datetime.now().isoformat(),
             "class": "fire",
@@ -129,27 +177,107 @@ def mock_detect() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Video source detection (Module B2)
+# STEP 2 — Validation helper
 # ---------------------------------------------------------------------------
 
-# Overlay colour palette (OpenCV uses BGR, not RGB).
+def is_valid_detection(d: dict) -> bool:
+    """
+    Validate that a detection dict has all 5 required fields with roughly
+    correct types.  Used inside get_frame_detections() to guard against
+    a malformed real-pipeline response before it reaches downstream code.
+
+    Does NOT validate value ranges (e.g. confidence ∈ [0,1]) — basic type
+    checks are enough for a prototype; the real pipeline already enforces
+    these constraints internally.
+    """
+    try:
+        return (
+            isinstance(d.get("timestamp"), str) and bool(d["timestamp"])
+            and isinstance(d.get("class"), str)
+            and isinstance(d.get("confidence"), (int, float))
+            and isinstance(d.get("bbox"), (list, tuple)) and len(d["bbox"]) == 4
+            and isinstance(d.get("severity"), str)
+        )
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# STEP 2 — Normalisation layer
+# ---------------------------------------------------------------------------
+
+def get_frame_detections(frame) -> list:
+    """
+    Single call site for per-frame inference.
+
+    If REAL_PIPELINE_AVAILABLE is True:
+      - Calls _run_pipeline(frame) (= inference.detect.run_pipeline).
+      - run_pipeline() already returns list[dict] with all 5 fields.
+      - Validates every item; on any validation failure or exception,
+        falls back to the mock-adapted result FOR THIS FRAME ONLY (does
+        not flip REAL_PIPELINE_AVAILABLE — one bad frame is not fatal).
+
+    If REAL_PIPELINE_AVAILABLE is False:
+      - Calls mock_detect() and adapts its single-dict output to list shape:
+          class == "none"  → []      (no detections)
+          class != "none"  → [dict]  (one detection)
+        This makes mock and real output the same list[dict] everywhere.
+
+    Returns list[dict] — always.  May be empty.
+    """
+    if REAL_PIPELINE_AVAILABLE and _run_pipeline is not None:
+        try:
+            results = _run_pipeline(frame)
+            # Normalise to list (run_pipeline already returns a list, but be
+            # defensive in case a future refactor wraps it in a single dict).
+            if isinstance(results, dict):
+                results = [results]
+            elif not isinstance(results, list):
+                results = list(results)
+
+            # Validate every item.  Discard malformed ones with a warning.
+            valid = []
+            for item in results:
+                if is_valid_detection(item):
+                    valid.append(item)
+                else:
+                    print(
+                        f"[get_frame_detections] Discarding malformed detection "
+                        f"from real pipeline: {item!r}"
+                    )
+            return valid
+
+        except Exception as pipeline_exc:
+            # Per-frame failure — print but do NOT disable the pipeline globally.
+            print(
+                f"[get_frame_detections] Real pipeline raised on this frame "
+                f"(falling back to mock for this frame): {pipeline_exc!r}"
+            )
+            # Fall through to mock-adapted result for this frame only.
+
+    # Mock-adapted path: convert single dict → list shape.
+    mock = mock_detect()
+    if mock.get("class") == "none":
+        return []
+    return [mock]
+
+
+# ---------------------------------------------------------------------------
+# Video source detection (Module B2 — unchanged)
+# ---------------------------------------------------------------------------
+
 _SEVERITY_COLORS = {
-    "Low":    (0, 255,   0),   # green
+    "Low":    (0, 255,   0),   # green  (BGR)
     "Medium": (0, 165, 255),   # orange
     "High":   (0,   0, 255),   # red
 }
-_DEFAULT_OVERLAY_COLOR = (0, 165, 255)  # orange for unknown/unexpected severity
+_DEFAULT_OVERLAY_COLOR = (0, 165, 255)
 
 
 def get_video_source():
     """
     Locate a sample video file or fall back to the system webcam.
-
-    Checks _SAMPLE_VIDEOS_DIR for files ending in .mp4, .avi, or .mov
-    (case-insensitive).  Returns the alphabetically first match as a string
-    path, or integer 0 (default webcam index) if none are found.
-
-    Prints its decision to stdout so it is visible in the Flask dev-server log.
+    Returns first alphabetically-sorted .mp4/.avi/.mov path, or int 0.
     """
     video_extensions = (".mp4", ".avi", ".mov")
 
@@ -164,23 +292,16 @@ def get_video_source():
             print(f"Using sample video: {chosen}")
             return chosen
 
-    print(
-        "No sample video found in sample_videos/ — "
-        "falling back to webcam index 0"
-    )
+    print("No sample video found in sample_videos/ — falling back to webcam index 0")
     return 0
 
 
 # ---------------------------------------------------------------------------
-# MJPEG frame generator (Module B2)
+# MJPEG frame generator (Module B2, rewired per Steps 3–4)
 # ---------------------------------------------------------------------------
 
-
 def _make_error_frame(message: str) -> bytes:
-    """
-    Produce a single black 640x480 JPEG frame with centred red error text.
-    Used as the sole yielded frame when no video source is available.
-    """
+    """Black 640×480 JPEG with centred red error text."""
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     font = cv2.FONT_HERSHEY_SIMPLEX
     text_size, _ = cv2.getTextSize(message, font, 0.8, 2)
@@ -193,20 +314,28 @@ def _make_error_frame(message: str) -> bytes:
 
 def generate_frames():
     """
-    MJPEG generator.  Yields multipart boundary-wrapped JPEG frames for the
-    /video_feed route.
+    MJPEG generator — rewired for Phase 8 Integration.
 
-    Lifecycle:
-    - Opens cv2.VideoCapture once; releases it in a finally block so the
-      camera/file handle is always freed, even on GeneratorExit (client
-      disconnect) or any unhandled exception.
-    - Sample videos loop seamlessly by seeking back to frame 0 on EOF.
-    - Webcam: breaks the loop on a failed read (device unavailable).
-    - Per-frame detection + overlay errors are caught locally so one bad
-      detection dict never kills the stream.
-    - Encoding failures skip the frame silently rather than yielding corrupt
-      bytes.
-    - Sleeps 30 ms per iteration (~30 fps cap) to avoid pinning the CPU.
+    Per-frame flow:
+      1. Read OpenCV frame from video source.
+      2. Call get_frame_detections(frame) ONCE — real pipeline or mock.
+      3. Write result into _latest_state under _state_lock so
+         GET /latest_detection always reflects what the stream is seeing.
+      4. For each detection in the list:
+           a. insert_event() — DB persistence (same safety pattern as B4).
+           b. Draw bbox + label overlay on the frame.
+      5. Feed overall_severity() → maybe_alert() / log_alert() (same as B5,
+         now driven by the real list rather than a single mock dict).
+      6. Encode and yield the annotated JPEG.
+
+    All error-handling patterns from B2/B4/B5 are preserved:
+    - cap.release() in finally regardless of how the generator exits.
+    - Video file EOF → seek to frame 0 for seamless looping.
+    - Webcam read failure → break with log.
+    - Per-frame detection/draw block isolated in try/except.
+    - insert_event wrapped in its own independent try/except.
+    - Notifier wrapped in its own independent try/except.
+    - JPEG encode failure → continue (skip frame, no corrupt bytes yielded).
     """
     source = get_video_source()
     is_file = isinstance(source, str)
@@ -215,9 +344,7 @@ def generate_frames():
 
     try:
         if not cap.isOpened():
-            print(
-                f"[generate_frames] cv2.VideoCapture could not open source: {source!r}"
-            )
+            print(f"[generate_frames] cv2.VideoCapture could not open source: {source!r}")
             error_bytes = _make_error_frame("NO VIDEO SOURCE AVAILABLE")
             yield (
                 b"--frame\r\n"
@@ -225,7 +352,7 @@ def generate_frames():
                 + error_bytes
                 + b"\r\n"
             )
-            return  # end the generator — do not loop
+            return
 
         while True:
             ret, frame = cap.read()
@@ -235,95 +362,85 @@ def generate_frames():
             # ----------------------------------------------------------------
             if not ret:
                 if is_file:
-                    # Video file ended — loop it back to the beginning for a
-                    # seamless continuous demo display.
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 else:
-                    # Webcam read failed (device disconnected / unavailable).
-                    print(
-                        "[generate_frames] Webcam read failed — "
-                        "stopping stream."
-                    )
+                    print("[generate_frames] Webcam read failed — stopping stream.")
                     break
 
             # ----------------------------------------------------------------
-            # Detection overlay
+            # STEP 2/4 — One inference call, feeds _latest_state and overlays
             # ----------------------------------------------------------------
             try:
-                detection = mock_detect()
-                det_class = detection.get("class", "none")
-                severity = detection.get("severity", "None")
-                confidence = detection.get("confidence", 0.0)
-                bbox = detection.get("bbox", [0, 0, 0, 0])
+                # One call per frame — no separate call from /latest_detection.
+                detections = get_frame_detections(frame)
 
-                # ---- Persist detection event (Module B4) -------------------
-                # Insert BEFORE drawing the overlay so logging and rendering
-                # are decoupled — a draw failure cannot suppress a log entry.
-                # Only log non-"none" detections: empty frames are not events.
-                # Belt-and-suspenders try/except wraps insert_event's own
-                # internal guard so a logging failure can NEVER interrupt the
-                # video stream under any circumstances.
-                if det_class != "none":
+                # ---- STEP 3: Write shared state under lock -----------------
+                with _state_lock:
+                    _latest_state["detections"] = detections
+                    _latest_state["updated_at"] = datetime.now().isoformat()
+
+                # ---- DB persistence (B4 pattern) and overlay drawing -------
+                for det in detections:
+                    det_class  = det.get("class", "none")
+                    severity   = det.get("severity", "None")
+                    confidence = det.get("confidence", 0.0)
+                    bbox       = det.get("bbox", [0, 0, 0, 0])
+
+                    # ---- insert_event: independent try/except (B4 pattern) --
                     try:
-                        insert_event(detection)
+                        insert_event(det)
                     except Exception as db_exc:
                         print(
                             f"[generate_frames] insert_event raised unexpectedly "
                             f"(stream continues): {db_exc!r}"
                         )
 
-                # ---- Server-side alert notification (Module B5) ------------
-                # Independent try/except — completely separate from the
-                # insert_event guard above.  A notifier failure must not
-                # affect DB logging, and a DB failure must not suppress
-                # the alert.  Both are independent safety layers.
-                # maybe_alert() is called on every detection (not gated on
-                # det_class != "none") so the transition tracker correctly
-                # sees "None" severity frames and resets the High-transition
-                # latch when the quiet phase returns.
+                    # ---- Draw overlay for this detection -------------------
+                    if det_class != "none":
+                        x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                        color = _SEVERITY_COLORS.get(severity, _DEFAULT_OVERLAY_COLOR)
+
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+
+                        label = f"{det_class} | {severity} | {confidence:.2f}"
+                        label_y = max(y - 10, 20)
+                        cv2.putText(
+                            frame, label,
+                            (x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7, color, 2,
+                        )
+
+                # ---- STEP 4/5: Alert notifier — frame-level severity -------
+                # maybe_alert() needs the worst severity across ALL detections
+                # so it correctly sees "None" on empty frames (latch reset).
+                # Independent try/except — a notifier failure cannot affect
+                # DB logging or the video stream (B5 pattern preserved).
                 try:
-                    if maybe_alert(severity):
-                        log_alert(detection)
+                    frame_severity = overall_severity(detections)
+                    if maybe_alert(frame_severity):
+                        primary = pick_primary_detection(detections)
+                        log_alert(primary)
                 except Exception as alert_exc:
                     print(
                         f"[generate_frames] Notifier raised unexpectedly "
                         f"(stream continues): {alert_exc!r}"
                     )
 
-                if det_class != "none":
-                    x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-                    color = _SEVERITY_COLORS.get(severity, _DEFAULT_OVERLAY_COLOR)
-
-                    # Draw bounding box (bbox is [x,y,w,h] → convert to corners)
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-
-                    # Draw label above the box; clamp so it never goes off-screen
-                    label = f"{det_class} | {severity} | {confidence:.2f}"
-                    label_y = max(y - 10, 20)
-                    cv2.putText(
-                        frame, label,
-                        (x, label_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, color, 2,
-                    )
-
-                # If det_class == "none", pass the clean frame through unchanged.
-
-            except Exception as overlay_exc:
-                # One bad detection dict must not kill the stream.
+            except Exception as frame_exc:
+                # Outer guard: any unhandled error in the detection/draw block
+                # passes the clean (un-annotated) frame through to the encoder.
                 print(
-                    f"[generate_frames] Overlay error (frame passed clean): "
-                    f"{overlay_exc!r}"
+                    f"[generate_frames] Frame processing error (frame passed clean): "
+                    f"{frame_exc!r}"
                 )
-                # frame is still valid — yield it un-annotated below.
 
             # ----------------------------------------------------------------
             # JPEG encode and yield
             # ----------------------------------------------------------------
             ok, buf = cv2.imencode(".jpg", frame)
             if not ok:
-                # Encoding failure — skip rather than yield corrupt bytes.
                 continue
 
             yield (
@@ -333,13 +450,11 @@ def generate_frames():
                 + b"\r\n"
             )
 
-            # ~30 fps cap — keeps CPU usage reasonable without throttling the UI
+            # ~30 fps cap
             time.sleep(0.03)
 
     finally:
-        # Always release the capture resource, regardless of how the generator
-        # exits (normal return, break, GeneratorExit from client disconnect,
-        # or any unhandled exception propagating out).
+        # Always release — even on GeneratorExit (client disconnect).
         cap.release()
 
 
@@ -351,12 +466,9 @@ def generate_frames():
 @app.route("/")
 def index():
     """
-    Serve the dashboard shell.
-
-    Using send_from_directory (rather than render_template) because index.html
-    is a standalone static file that lives outside Flask's conventional
-    'templates/' folder.  send_from_directory avoids introducing a template
-    engine dependency for what will eventually be a pre-built frontend bundle.
+    Serve the dashboard shell (frontend/index.html).
+    send_from_directory used over render_template — file is static, not a
+    Jinja2 template; avoids template engine dependency for a future bundle.
     """
     return send_from_directory(_FRONTEND_DIR, "index.html")
 
@@ -364,12 +476,9 @@ def index():
 @app.route("/video_feed")
 def video_feed():
     """
-    MJPEG streaming route (Module B2).
-
-    Returns a multipart/x-mixed-replace response so browsers display a
-    continuous live video feed.  generate_frames() handles source detection,
-    OpenCV capture lifecycle, mock-detection overlays, and graceful error
-    recovery internally.
+    MJPEG streaming route.
+    generate_frames() handles capture lifecycle, real/mock inference,
+    overlay drawing, DB logging, and alert notification internally.
     """
     return Response(
         generate_frames(),
@@ -380,19 +489,24 @@ def video_feed():
 @app.route("/latest_detection")
 def latest_detection():
     """
-    Return the most recent detection result as JSON.
+    STEP 5 — Return the most recent detection as JSON.
 
-    The try/except lives here in the route (not inside mock_detect) so that
-    ANY unexpected error during detection — including future integration errors
-    from Developer A's pipeline — is caught at the HTTP boundary and never
-    causes a 500 to the client.
+    Reads _latest_state under _state_lock (written by generate_frames()).
+    Passes the detection list through pick_primary_detection() to produce a
+    single dict matching the EXACT 5-field shape frontend/script.js expects:
+      {"timestamp", "class", "confidence", "bbox", "severity"}
+
+    No inference call is made here — avoids duplicate / inconsistent results
+    vs. the video stream that is already running run_pipeline() every frame.
+
+    Falls back to a safe "none" detection on any read or serialisation error.
     """
     try:
-        result = mock_detect()
+        with _state_lock:
+            detections = list(_latest_state["detections"])  # shallow copy under lock
+        result = pick_primary_detection(detections)
     except Exception as exc:
-        # Print to stdout so it appears in the Flask dev-server log.
-        print(f"[latest_detection] mock_detect() raised an exception: {exc!r}")
-        # Return a safe "none" detection so the dashboard keeps running.
+        print(f"[latest_detection] Error reading shared state: {exc!r}")
         result = {
             "timestamp": datetime.now().isoformat(),
             "class": "none",
@@ -407,18 +521,11 @@ def latest_detection():
 def events():
     """
     Return the 20 most recent persisted detection events as JSON (Module B4).
-
-    Calls get_recent_events() from backend/database/db.py.  On any failure
-    (database unavailable, corrupt data, etc.) returns an empty list with
-    HTTP 200 — a read failure must never 500 the dashboard.
-
-    Row order: newest first (ORDER BY id DESC in the query).
+    Falls back to [] on any failure — a read error must never 500 the dashboard.
     """
     try:
         result = get_recent_events(20)
     except Exception as exc:
-        # Should never reach here (get_recent_events has its own guard), but
-        # belt-and-suspenders at the HTTP boundary.
         print(f"[events] get_recent_events raised unexpectedly: {exc!r}")
         result = []
     return jsonify(result)
