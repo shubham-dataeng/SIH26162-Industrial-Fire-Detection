@@ -71,13 +71,6 @@ except Exception as _import_err:
     print(f"[app] Real AI pipeline unavailable — running on mock detections only: {_import_err!r}")
 
 # ---------------------------------------------------------------------------
-# App setup
-# ---------------------------------------------------------------------------
-
-app = Flask(__name__)
-CORS(app)
-
-# ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
 
@@ -88,6 +81,15 @@ _FRONTEND_DIR = os.path.abspath(
 _SAMPLE_VIDEOS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "sample_videos")
 )
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+
+# Serve frontend/ directly as static_folder (eliminates duplicate backend/static copy that was silently going stale).
+app = Flask(__name__, static_folder=_FRONTEND_DIR, static_url_path="/static")
+CORS(app)
+
 
 # ---------------------------------------------------------------------------
 # STEP 3 — Shared per-frame state
