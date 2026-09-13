@@ -100,6 +100,9 @@ CORS(app)
 # This is a SEPARATE lock from notifier.py's _lock — do not conflate them.
 _state_lock = threading.Lock()
 _latest_state: dict = {"detections": [], "updated_at": None}
+# Tracks per-frame inference status (Phase 12): True if real pipeline succeeded on last frame, False if fallen back to mock.
+_last_frame_was_real: bool = REAL_PIPELINE_AVAILABLE
+
 
 # Severity ordering used by pick_primary_detection() and overall_severity().
 _SEVERITY_RANK: dict[str, int] = {"High": 3, "Medium": 2, "Low": 1, "None": 0}
@@ -247,6 +250,8 @@ def get_frame_detections(frame) -> list:
                         f"[get_frame_detections] Discarding malformed detection "
                         f"from real pipeline: {item!r}"
                     )
+            with _state_lock:
+                _last_frame_was_real = True
             return valid
 
         except Exception as pipeline_exc:
@@ -258,10 +263,13 @@ def get_frame_detections(frame) -> list:
             # Fall through to mock-adapted result for this frame only.
 
     # Mock-adapted path: convert single dict → list shape.
+    with _state_lock:
+        _last_frame_was_real = False
     mock = mock_detect()
     if mock.get("class") == "none":
         return []
     return [mock]
+
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +514,12 @@ def latest_detection():
     try:
         with _state_lock:
             detections = list(_latest_state["detections"])  # shallow copy under lock
+            pipeline_mode = "real" if (REAL_PIPELINE_AVAILABLE and _last_frame_was_real) else "mock"
         result = pick_primary_detection(detections)
+
+        # Phase 12: Additive field indicating active pipeline mode ("real" vs "mock").
+        # Note: This is an additive field only; existing frontend contracts remain untouched, so this addition cannot break working behavior.
+        result["pipeline_mode"] = pipeline_mode
     except Exception as exc:
         print(f"[latest_detection] Error reading shared state: {exc!r}")
         result = {
@@ -515,8 +528,10 @@ def latest_detection():
             "confidence": 0.0,
             "bbox": [0, 0, 0, 0],
             "severity": "None",
+            "pipeline_mode": "mock",
         }
     return jsonify(result)
+
 
 
 @app.route("/events")

@@ -34,7 +34,12 @@
         <div class="status-block">
           <span class="label">Current Severity</span>
           <div id="severity-badge" class="severity-none">No Detection</div>
+          <div id="pipeline-status" class="pipeline-status hidden" role="status">
+            <span class="pipeline-status-icon">⚠</span>
+            <span class="pipeline-status-text">Running on fallback detection (AI module offline)</span>
+          </div>
         </div>
+
 
         <!-- Alert banner (hidden by default) -->
         <div id="alert-banner" class="alert-banner hidden" role="alert" aria-live="assertive">

@@ -197,11 +197,33 @@ header h1 {
 }
 
 /* --------------------------------------------------------------------------
+   Pipeline fallback status indicator (Phase 12)
+   -------------------------------------------------------------------------- */
+.pipeline-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #d97706; /* distinct, non-alarming amber text */
+  background: rgba(217, 119, 6, 0.12); /* subtle muted amber background */
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  border-radius: var(--radius);
+  padding: 0.35rem 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.pipeline-status-icon {
+  font-size: 0.95rem;
+}
+
+/* --------------------------------------------------------------------------
    Alert banner — hidden by default, toggled by script.js via .hidden
    -------------------------------------------------------------------------- */
 .hidden {
   display: none !important;
 }
+
 
 .alert-banner {
   display: flex;

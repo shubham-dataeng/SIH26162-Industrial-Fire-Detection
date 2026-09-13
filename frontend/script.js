@@ -17,9 +17,11 @@
    DOM element cache — looked up once at load time, reused in every poll.
    ========================================================================== */
 const severityBadge    = document.getElementById("severity-badge");
+const pipelineStatus   = document.getElementById("pipeline-status");
 const alertBanner      = document.getElementById("alert-banner");
 const detectionCounter = document.getElementById("detection-counter");
 const eventList        = document.getElementById("event-list");
+
 
 /* ==========================================================================
    State variables
@@ -160,6 +162,16 @@ function handleDetection(data) {
   // --- Always update: severity badge and alert banner (live state) ----------
   updateSeverityBadge(currentSeverity);
   updateAlertBanner(currentSeverity);
+
+  // --- Pipeline mode indicator (Phase 12: show fallback warning when mock) --
+  if (pipelineStatus) {
+    if (data.pipeline_mode === "mock") {
+      pipelineStatus.classList.remove("hidden");
+    } else {
+      pipelineStatus.classList.add("hidden");
+    }
+  }
+
 
   // --- De-duplicated update: counter + event log ----------------------------
   // Only increment and log when:
