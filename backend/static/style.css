@@ -1,0 +1,348 @@
+/* ==========================================================================
+   SIH26162 — Industrial Fire Detection Dashboard
+   style.css  |  Developer B  |  Module B3
+   Dark industrial-monitoring aesthetic — legibility and safety-first.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Reset & base
+   -------------------------------------------------------------------------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* Colour tokens */
+  --bg-page:        #0d0f12;
+  --bg-panel:       #151820;
+  --bg-panel-border:#252b38;
+  --text-primary:   #e8eaf0;
+  --text-secondary: #8a9bb0;
+  --text-muted:     #505a6e;
+  --accent-blue:    #2979ff;
+
+  /* Severity palette */
+  --clr-low-bg:     #0d3320;
+  --clr-low-text:   #4caf50;
+  --clr-low-border: #2e7d32;
+  --clr-medium-bg:  #3d2100;
+  --clr-medium-text:#ff9800;
+  --clr-medium-border:#e65100;
+  --clr-high-bg:    #3d0000;
+  --clr-high-text:  #f44336;
+  --clr-high-border:#b71c1c;
+  --clr-none-bg:    #1e2330;
+  --clr-none-text:  #8a9bb0;
+  --clr-none-border:#2c3447;
+
+  /* Spacing */
+  --gap:    1.25rem;
+  --radius: 6px;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --------------------------------------------------------------------------
+   Header
+   -------------------------------------------------------------------------- */
+header {
+  background: linear-gradient(135deg, #1a0000 0%, #1c1f2e 100%);
+  border-bottom: 2px solid var(--clr-high-border);
+  padding: 1rem 1.5rem;
+}
+
+header h1 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+
+.subtitle {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: 0.15rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* --------------------------------------------------------------------------
+   Main grid layout — two columns, collapses at 800 px
+   -------------------------------------------------------------------------- */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap);
+  padding: var(--gap);
+  flex: 1;
+  align-items: start;
+}
+
+@media (max-width: 800px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Panels
+   -------------------------------------------------------------------------- */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--bg-panel-border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+}
+
+.panel h2 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--bg-panel-border);
+  padding-bottom: 0.6rem;
+  margin-bottom: var(--gap);
+}
+
+/* --------------------------------------------------------------------------
+   Video panel
+   -------------------------------------------------------------------------- */
+.video-wrapper {
+  width: 100%;
+  background: #000;
+  border-radius: 4px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#video-feed {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* --------------------------------------------------------------------------
+   Status panel — generic status blocks
+   -------------------------------------------------------------------------- */
+.status-block {
+  margin-bottom: var(--gap);
+}
+
+.status-block .label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 0.4rem;
+}
+
+/* --------------------------------------------------------------------------
+   Severity badge — class toggled by script.js
+   -------------------------------------------------------------------------- */
+#severity-badge {
+  display: inline-block;
+  padding: 0.45rem 1.1rem;
+  border-radius: var(--radius);
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+.severity-none {
+  background-color: var(--clr-none-bg);
+  color: var(--clr-none-text);
+  border-color: var(--clr-none-border);
+}
+
+.severity-low {
+  background-color: var(--clr-low-bg);
+  color: var(--clr-low-text);
+  border-color: var(--clr-low-border);
+}
+
+.severity-medium {
+  background-color: var(--clr-medium-bg);
+  color: var(--clr-medium-text);
+  border-color: var(--clr-medium-border);
+}
+
+.severity-high {
+  background-color: var(--clr-high-bg);
+  color: var(--clr-high-text);
+  border-color: var(--clr-high-border);
+}
+
+/* --------------------------------------------------------------------------
+   Alert banner — hidden by default, toggled by script.js via .hidden
+   -------------------------------------------------------------------------- */
+.hidden {
+  display: none !important;
+}
+
+.alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background-color: #9b1c1c;
+  border: 2px solid #ef4444;
+  border-radius: var(--radius);
+  padding: 0.8rem 1.1rem;
+  margin-bottom: var(--gap);
+  animation: pulse-alert 1.2s ease-in-out infinite;
+}
+
+.alert-icon {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+.alert-text {
+  font-weight: 700;
+  font-size: 1rem;
+  color: #fff;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+@keyframes pulse-alert {
+  0%   { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0.7); }
+  50%  { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0); }
+}
+
+/* --------------------------------------------------------------------------
+   Detection counter
+   -------------------------------------------------------------------------- */
+.counter {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--accent-blue);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* --------------------------------------------------------------------------
+   Event log
+   -------------------------------------------------------------------------- */
+.event-log-section {
+  margin-top: 0.5rem;
+}
+
+.event-log-section h3 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+#event-list {
+  list-style: none;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--bg-panel-border);
+  border-radius: var(--radius);
+  background: #0d0f12;
+  padding: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-panel-border) transparent;
+}
+
+#event-list::-webkit-scrollbar {
+  width: 5px;
+}
+#event-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+#event-list::-webkit-scrollbar-thumb {
+  background-color: var(--bg-panel-border);
+  border-radius: 3px;
+}
+
+/* Individual event entry */
+.event-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--bg-panel-border);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.event-entry:last-child {
+  border-bottom: none;
+}
+
+.event-time {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.event-class {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.event-confidence {
+  color: var(--text-secondary);
+  margin-left: auto;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Severity colouring on event entries (same CSS class scheme as badge) */
+.event-entry.severity-low    { border-left: 3px solid var(--clr-low-border);    }
+.event-entry.severity-medium { border-left: 3px solid var(--clr-medium-border); }
+.event-entry.severity-high   { border-left: 3px solid var(--clr-high-border);   }
+.event-entry.severity-none   { border-left: 3px solid var(--clr-none-border);   }
+
+.event-entry.severity-low    .event-class { color: var(--clr-low-text);    }
+.event-entry.severity-medium .event-class { color: var(--clr-medium-text); }
+.event-entry.severity-high   .event-class { color: var(--clr-high-text);   }
+
+/* --------------------------------------------------------------------------
+   Footer
+   -------------------------------------------------------------------------- */
+footer {
+  text-align: center;
+  padding: 0.6rem 1rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--bg-panel-border);
+}
+
+footer code {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
