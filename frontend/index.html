@@ -4,8 +4,65 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Industrial Fire Detection Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <h1>Dashboard placeholder — Module 1</h1>
+    <header>
+      <h1>🔥 SIH26162 — Industrial Fire Detection Dashboard</h1>
+      <p class="subtitle">AI-powered real-time monitoring system</p>
+    </header>
+
+    <main class="dashboard-grid">
+
+      <!-- LEFT: Video panel -->
+      <section class="panel video-panel" aria-label="Live video feed">
+        <h2>Live Feed</h2>
+        <div class="video-wrapper">
+          <img
+            id="video-feed"
+            src="/video_feed"
+            alt="Live camera feed — MJPEG stream"
+          />
+        </div>
+      </section>
+
+      <!-- RIGHT: Status panel -->
+      <section class="panel status-panel" aria-label="Detection status">
+        <h2>Detection Status</h2>
+
+        <!-- Severity badge -->
+        <div class="status-block">
+          <span class="label">Current Severity</span>
+          <div id="severity-badge" class="severity-none">No Detection</div>
+        </div>
+
+        <!-- Alert banner (hidden by default) -->
+        <div id="alert-banner" class="alert-banner hidden" role="alert" aria-live="assertive">
+          <span class="alert-icon">🔥</span>
+          <span class="alert-text">HIGH SEVERITY ALERT</span>
+        </div>
+
+        <!-- Session detection counter -->
+        <div class="status-block">
+          <span class="label">Detections This Session</span>
+          <div id="detection-counter" class="counter">0</div>
+        </div>
+
+        <!-- Scrollable event log -->
+        <div class="event-log-section">
+          <h3>Recent Events</h3>
+          <ol id="event-list" class="event-list" aria-label="Recent detection events">
+            <!-- Entries prepended by script.js -->
+          </ol>
+        </div>
+
+      </section>
+    </main>
+
+    <footer>
+      <p>Polling <code>/latest_detection</code> every 1 s &nbsp;|&nbsp; Module B3 — Developer B</p>
+    </footer>
+
+    <script src="/static/script.js" defer></script>
   </body>
 </html>
