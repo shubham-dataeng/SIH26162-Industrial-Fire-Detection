@@ -31,6 +31,7 @@ Routes:
   GET  /latest_detection   — Single detection JSON from shared _latest_state
   GET  /events             — 20 most recent persisted events
   POST /switch_video       — Hot-swap active video source ({"video": "N.mp4"})
+  GET  /snapshots/<fname>  — Serve saved alert snapshot image
 """
 
 import os
@@ -82,6 +83,11 @@ _FRONTEND_DIR = os.path.abspath(
 _SAMPLE_VIDEOS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "sample_videos")
 )
+
+_SNAPSHOTS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "database", "snapshots")
+)
+os.makedirs(_SNAPSHOTS_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -426,23 +432,13 @@ def generate_frames():
                     _latest_state["detections"] = detections
                     _latest_state["updated_at"] = datetime.now().isoformat()
 
-                # ---- DB persistence (B4 pattern) and overlay drawing -------
+                # ---- Draw overlay for all valid detections first -----------
                 for det in detections:
                     det_class  = det.get("class", "none")
                     severity   = det.get("severity", "None")
                     confidence = det.get("confidence", 0.0)
                     bbox       = det.get("bbox", [0, 0, 0, 0])
 
-                    # ---- insert_event: independent try/except (B4 pattern) --
-                    try:
-                        insert_event(det)
-                    except Exception as db_exc:
-                        print(
-                            f"[generate_frames] insert_event raised unexpectedly "
-                            f"(stream continues): {db_exc!r}"
-                        )
-
-                    # ---- Draw overlay for this detection -------------------
                     if det_class != "none":
                         x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
                         color = _SEVERITY_COLORS.get(severity, _DEFAULT_OVERLAY_COLOR)
@@ -458,21 +454,52 @@ def generate_frames():
                             0.7, color, 2,
                         )
 
-                # ---- STEP 4/5: Alert notifier — frame-level severity -------
+                # ---- STEP 4/5: Alert notifier & snapshot capture -----------
                 # maybe_alert() needs the worst severity across ALL detections
                 # so it correctly sees "None" on empty frames (latch reset).
                 # Independent try/except — a notifier failure cannot affect
                 # DB logging or the video stream (B5 pattern preserved).
+                snapshot_filename: str | None = None
+                primary_det = None
+
                 try:
                     frame_severity = overall_severity(detections)
                     if maybe_alert(frame_severity):
-                        primary = pick_primary_detection(detections)
-                        log_alert(primary)
+                        primary_det = pick_primary_detection(detections)
+
+                        # Capture and save annotated frame snapshot
+                        try:
+                            ts_safe = datetime.now().isoformat().replace(":", "-")
+                            snapshot_filename = f"snapshot_{ts_safe}.jpg"
+                            snapshot_full_path = os.path.join(_SNAPSHOTS_DIR, snapshot_filename)
+                            cv2.imwrite(snapshot_full_path, frame)
+                        except Exception as snap_exc:
+                            print(
+                                f"[generate_frames] Snapshot save failed "
+                                f"(alert continues): {snap_exc!r}"
+                            )
+                            snapshot_filename = None
+
+                        log_alert(primary_det)
                 except Exception as alert_exc:
                     print(
                         f"[generate_frames] Notifier raised unexpectedly "
                         f"(stream continues): {alert_exc!r}"
                     )
+
+                # ---- DB persistence (B4 pattern) ---------------------------
+                # For each detection, persist to DB. If a snapshot was captured
+                # on this High-severity transition, associate snapshot_filename
+                # ONLY with the primary detection (other detections get None).
+                for det in detections:
+                    try:
+                        det_snap = snapshot_filename if (snapshot_filename and det is primary_det) else None
+                        insert_event(det, snapshot_path=det_snap)
+                    except Exception as db_exc:
+                        print(
+                            f"[generate_frames] insert_event raised unexpectedly "
+                            f"(stream continues): {db_exc!r}"
+                        )
 
             except Exception as frame_exc:
                 # Outer guard: any unhandled error in the detection/draw block
@@ -659,6 +686,22 @@ def events():
         print(f"[events] get_recent_events raised unexpectedly: {exc!r}")
         result = []
     return jsonify(result)
+
+
+@app.route("/snapshots/<filename>")
+def get_snapshot(filename: str):
+    """
+    Serve saved snapshot images from backend/database/snapshots/.
+
+    Security: uses os.path.basename to strip any path traversal sequences
+    (../, absolute paths) before passing to send_from_directory.
+    """
+    safe_filename = os.path.basename(filename)
+    file_path = os.path.join(_SNAPSHOTS_DIR, safe_filename)
+    if not os.path.isfile(file_path):
+        return jsonify({"error": "Snapshot not found"}), 404
+    return send_from_directory(_SNAPSHOTS_DIR, safe_filename)
+
 
 
 # ---------------------------------------------------------------------------

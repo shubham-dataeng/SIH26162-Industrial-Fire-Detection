@@ -21,11 +21,12 @@ Only this Python module is committed.
 
 Schema (no bbox — not useful to persist; the video stream already shows it):
   events (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      timestamp  TEXT    NOT NULL,
-      class      TEXT    NOT NULL,
-      confidence REAL    NOT NULL,
-      severity   TEXT    NOT NULL
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp     TEXT    NOT NULL,
+      class         TEXT    NOT NULL,
+      confidence    REAL    NOT NULL,
+      severity      TEXT    NOT NULL,
+      snapshot_path TEXT    DEFAULT NULL
   )
 """
 
@@ -44,36 +45,47 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.db")
 # DDL used by init_db() — stored as a module-level constant for clarity.
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp  TEXT    NOT NULL,
-    class      TEXT    NOT NULL,
-    confidence REAL    NOT NULL,
-    severity   TEXT    NOT NULL
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp     TEXT    NOT NULL,
+    class         TEXT    NOT NULL,
+    confidence    REAL    NOT NULL,
+    severity      TEXT    NOT NULL,
+    snapshot_path TEXT
 );
 """
 
 
 def init_db() -> None:
     """
-    Create the events table if it does not already exist.
+    Create the events table if it does not already exist, and ensure
+    snapshot_path column is present for existing databases.
 
     Opens its own connection, runs CREATE TABLE IF NOT EXISTS (fully
-    idempotent), commits, and immediately closes.  Safe to call at import time
-    and safe to call again on every app restart.
+    idempotent), verifies/adds the snapshot_path column, commits, and
+    immediately closes.  Safe to call at import time and safe to call again
+    on every app restart.
     """
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute(_CREATE_TABLE_SQL)
+
+        # Migration helper: Check if snapshot_path column exists in an already created events table
+        cursor = conn.execute("PRAGMA table_info(events)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "snapshot_path" not in columns:
+            conn.execute("ALTER TABLE events ADD COLUMN snapshot_path TEXT")
+
         conn.commit()
     finally:
         conn.close()
 
 
-def insert_event(event: dict) -> None:
+def insert_event(event: dict, snapshot_path: str | None = None) -> None:
     """
     Persist one detection event to the database.
 
-    Only "timestamp", "class", "confidence", and "severity" are stored.
+    Only "timestamp", "class", "confidence", "severity", and optional
+    "snapshot_path" are stored.
     "bbox" is intentionally omitted from the schema — it is already rendered
     live on the video stream overlay and does not need to be queryable.
 
@@ -90,14 +102,17 @@ def insert_event(event: dict) -> None:
     try:
         conn = sqlite3.connect(DB_PATH)
         try:
+            # Check if snapshot_path was passed as arg or in event dict
+            snap = snapshot_path if snapshot_path is not None else event.get("snapshot_path")
             conn.execute(
-                "INSERT INTO events (timestamp, class, confidence, severity) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO events (timestamp, class, confidence, severity, snapshot_path) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (
                     event["timestamp"],
                     event["class"],
                     float(event["confidence"]),
                     event["severity"],
+                    snap,
                 ),
             )
             conn.commit()
@@ -113,7 +128,7 @@ def get_recent_events(limit: int = 20) -> list:
     """
     Return the `limit` most recently inserted events as a list of dicts.
 
-    Each dict has keys: "id", "timestamp", "class", "confidence", "severity".
+    Each dict has keys: "id", "timestamp", "class", "confidence", "severity", "snapshot_path".
     Returns an empty list on any failure (query errors must not 500 the caller).
 
     Row ordering: id DESC ensures newest-first; the caller can reverse if needed.
@@ -123,7 +138,7 @@ def get_recent_events(limit: int = 20) -> list:
         conn.row_factory = sqlite3.Row  # enables dict-style column access
         try:
             cursor = conn.execute(
-                "SELECT id, timestamp, class, confidence, severity "
+                "SELECT id, timestamp, class, confidence, severity, snapshot_path "
                 "FROM events "
                 "ORDER BY id DESC "
                 "LIMIT ?",
@@ -136,11 +151,12 @@ def get_recent_events(limit: int = 20) -> list:
         # Convert sqlite3.Row objects to plain dicts for JSON serialisation.
         return [
             {
-                "id":         row["id"],
-                "timestamp":  row["timestamp"],
-                "class":      row["class"],
-                "confidence": row["confidence"],
-                "severity":   row["severity"],
+                "id":            row["id"],
+                "timestamp":     row["timestamp"],
+                "class":         row["class"],
+                "confidence":    row["confidence"],
+                "severity":      row["severity"],
+                "snapshot_path": row["snapshot_path"],
             }
             for row in rows
         ]
