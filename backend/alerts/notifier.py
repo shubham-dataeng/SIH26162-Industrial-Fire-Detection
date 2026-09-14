@@ -12,23 +12,33 @@ Provides three functions consumed by backend/app.py's generate_frames():
 
   log_alert(event)
       Prints a single formatted console line for every confirmed High
-      transition and dispatches a real Twilio SMS if SMS_CONFIGURED is True.
-      Failure-isolated: a malformed event dict or SMS failure never raises
-      and never breaks the console log.
+      transition and dispatches alerts via all configured channels
+      (Telegram Bot and/or Fast2SMS SMS).
+      Failure-isolated: a malformed event dict or failure in any notification
+      channel never raises, never affects the other channel, and never breaks
+      the console log.
 
   send_email_alert(event)
       STUB ONLY — intentional no-op placeholder for a future optional
       SMTP feature.  Not wired into generate_frames() or any route.
       See docstring for integration guidance when the time comes.
 
-SMS alerting (added 2026-09-13)
---------------------------------
-Twilio SMS is sent on every Low/Medium/None → High transition, exactly
-once per transition (same gate as the existing console log).  Credentials
-are loaded from a .env file at the repo root via python-dotenv.  If any
-of the four required keys (TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, ALERT_TO)
-are absent or empty, SMS is silently disabled and console logging is
-completely unaffected.
+Multi-channel alerting (Telegram + Fast2SMS) (updated 2026-09-14)
+-----------------------------------------------------------------
+Alerts are sent on every Low/Medium/None → High transition, exactly once per
+transition (same gate as the existing console log). Credentials are loaded
+from a .env file at the repo root via python-dotenv:
+  - Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+  - Fast2SMS: FAST2SMS_API_KEY, ALERT_PHONE_NUMBER
+
+Each channel is independently configured and failure-isolated:
+  1. Telegram Bot API: POST https://api.telegram.org/bot<TOKEN>/sendMessage
+     Sends alert message JSON with a 10-second timeout. Checks {"ok": true}.
+  2. Fast2SMS Quick SMS: GET https://www.fast2sms.com/dev/bulkV2
+     Sends alert SMS via route="q" with a 10-second timeout. Checks {"return": true}.
+
+If credentials for a channel are absent or empty, that channel is disabled while
+any configured channel and console logging continue unaffected.
 
 Thread-safety design note
 --------------------------
@@ -56,6 +66,7 @@ our read and our write, and thereby seeing stale "pre-transition" state.
 import os
 import threading
 
+import requests as _requests      # already in requirements.txt; used by send_sms_alert
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -67,27 +78,42 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 load_dotenv(os.path.join(_REPO_ROOT, ".env"), override=False)
 
 # ---------------------------------------------------------------------------
-# SMS configuration — read once at import time, never re-read per alert.
+# Alert configuration — read once at import time, never re-read per alert.
+# SMS_CONFIGURED name is kept for compatibility with app.py's existing import
+# (it indicates whether Telegram is configured).
+# SMS_ALERT_CONFIGURED specifically gates Fast2SMS SMS alerting.
 # ---------------------------------------------------------------------------
-_TWILIO_SID   = os.environ.get("TWILIO_SID",   "").strip()
-_TWILIO_TOKEN = os.environ.get("TWILIO_TOKEN",  "").strip()
-_TWILIO_FROM  = os.environ.get("TWILIO_FROM",   "").strip()
-_ALERT_TO     = os.environ.get("ALERT_TO",      "").strip()
+_TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN",  "").strip()
+_TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID",    "").strip()  # string; may be negative for groups
+_FAST2SMS_API_KEY    = os.environ.get("FAST2SMS_API_KEY",    "").strip()
+_ALERT_PHONE_NUMBER  = os.environ.get("ALERT_PHONE_NUMBER",  "").strip()  # 10-digit Indian number
 
-# True only if every required key is present and non-empty.
-SMS_CONFIGURED: bool = all([_TWILIO_SID, _TWILIO_TOKEN, _TWILIO_FROM, _ALERT_TO])
+# True only if every required key for that service is present and non-empty.
+SMS_CONFIGURED: bool = all([_TELEGRAM_BOT_TOKEN, _TELEGRAM_CHAT_ID])
+SMS_ALERT_CONFIGURED: bool = all([_FAST2SMS_API_KEY, _ALERT_PHONE_NUMBER])
 
 # Report startup status — presence only, never credential values.
 if SMS_CONFIGURED:
-    print("[notifier] SMS alerting ACTIVE via Twilio "
-          "(TWILIO_SID=PRESENT, TWILIO_TOKEN=PRESENT, "
-          "TWILIO_FROM=PRESENT, ALERT_TO=PRESENT)")
+    print("[notifier] Telegram alerting ACTIVE "
+          "(TELEGRAM_BOT_TOKEN=PRESENT, TELEGRAM_CHAT_ID=PRESENT)")
 else:
-    _missing = [k for k, v in {
-        "TWILIO_SID": _TWILIO_SID, "TWILIO_TOKEN": _TWILIO_TOKEN,
-        "TWILIO_FROM": _TWILIO_FROM, "ALERT_TO": _ALERT_TO,
+    _missing_tg = [k for k, v in {
+        "TELEGRAM_BOT_TOKEN": _TELEGRAM_BOT_TOKEN,
+        "TELEGRAM_CHAT_ID":   _TELEGRAM_CHAT_ID,
     }.items() if not v]
-    print(f"[notifier] SMS alerting DISABLED — missing or empty keys: {_missing}")
+    print(f"[notifier] Telegram alerting DISABLED — missing or empty keys: {_missing_tg}")
+
+if SMS_ALERT_CONFIGURED:
+    print("[notifier] Fast2SMS alerting ACTIVE "
+          "(FAST2SMS_API_KEY=PRESENT, ALERT_PHONE_NUMBER=PRESENT)")
+else:
+    _missing_sms = [k for k, v in {
+        "FAST2SMS_API_KEY":   _FAST2SMS_API_KEY,
+        "ALERT_PHONE_NUMBER": _ALERT_PHONE_NUMBER,
+    }.items() if not v]
+    print(f"[notifier] Fast2SMS alerting DISABLED — missing or empty keys: {_missing_sms}")
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -147,12 +173,13 @@ def maybe_alert(current_severity: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# send_sms_alert — Twilio SMS dispatch for confirmed High transitions
+# send_sms_alert — Telegram Bot dispatch for confirmed High transitions
+# (name kept as send_sms_alert for compatibility with log_alert's call site)
 # ---------------------------------------------------------------------------
 
 def send_sms_alert(event: dict) -> None:
     """
-    Send a Twilio SMS for a confirmed High-severity transition.
+    Send a Telegram Bot message for a confirmed High-severity transition.
 
     No-ops immediately if SMS_CONFIGURED is False (missing .env keys).
     Must never raise — any exception is caught and printed here so that
@@ -179,39 +206,112 @@ def send_sms_alert(event: dict) -> None:
             f"Action Required: Evacuate and contact emergency services."
         )
 
-        from twilio.rest import Client  # import here keeps startup fast when disabled
-        client = Client(_TWILIO_SID, _TWILIO_TOKEN)
-        message = client.messages.create(
-            body=body,
-            from_=_TWILIO_FROM,
-            to=_ALERT_TO,
+        # Telegram Bot API — sendMessage endpoint.
+        # Using POST with a JSON body; chat_id is kept as a string because
+        # group/supergroup IDs are negative integers and we never need to
+        # do arithmetic on them.
+        url = f"https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/sendMessage"
+        response = _requests.post(
+            url,
+            json={
+                "chat_id": _TELEGRAM_CHAT_ID,
+                "text":    body,
+            },
+            timeout=10,   # seconds — prevents a slow API call from stalling the stream
         )
-        print(f"[notifier] SMS sent successfully (SID: {message.sid})")
+
+        # Telegram always returns 200 for well-formed requests; ok/failure
+        # is signalled by the "ok" field in the JSON body.
+        result = response.json()
+        if result.get("ok") is True:
+            message_id = result.get("result", {}).get("message_id", "n/a")
+            print(f"[notifier] Telegram message sent successfully (message_id: {message_id})")
+        else:
+            reason = result.get("description", repr(result))
+            print(f"[notifier] Telegram message failed: {reason}")
 
     except Exception as exc:
-        # Check for Twilio's unverified-recipient error specifically.
-        exc_str = str(exc)
-        if "unverified" in exc_str.lower() or "21608" in exc_str:
-            print(
-                "[notifier] SMS failed: recipient number is not verified in your "
-                "Twilio trial account — verify it at https://console.twilio.com"
-            )
-        else:
-            # Generic failure: show type + short reason, never credential values.
-            print(f"[notifier] SMS failed: {type(exc).__name__} — {exc_str[:120]}")
+        # Generic failure (network error, JSON parse error, etc.).
+        # Never raise — caller must remain unaffected by notification issues.
+        print(f"[notifier] Telegram alert failed: {type(exc).__name__} — {str(exc)[:120]}")
 
 
 # ---------------------------------------------------------------------------
-# log_alert — console output + SMS for confirmed High transitions
+# send_fast2sms_alert — Fast2SMS SMS dispatch for confirmed High transitions
+# ---------------------------------------------------------------------------
+
+def send_fast2sms_alert(event: dict) -> None:
+    """
+    Send a Fast2SMS Quick SMS for a confirmed High-severity transition.
+
+    No-ops immediately if SMS_ALERT_CONFIGURED is False (missing .env keys).
+    Must never raise — any exception is caught and printed here so that
+    the caller (log_alert) is never disrupted.
+
+    Parameters
+    ----------
+    event : dict
+        The 5-field detection contract dict:
+        {"timestamp", "class", "confidence", "bbox", "severity"}
+    """
+    if not SMS_ALERT_CONFIGURED:
+        return
+
+    try:
+        confidence = float(event.get("confidence", 0))
+        timestamp  = event.get("timestamp", "unknown")
+
+        body = (
+            f"🔥 FIRE ALERT - SIH26162\n"
+            f"Severity: HIGH\n"
+            f"Confidence: {confidence * 100:.0f}%\n"
+            f"Time: {timestamp}\n"
+            f"Action Required: Evacuate and contact emergency services."
+        )
+
+        # Fast2SMS Quick SMS route — params passed as a dict, not query-string
+        # concatenation, so special characters in `body` are safely encoded.
+        response = _requests.get(
+            "https://www.fast2sms.com/dev/bulkV2",
+            params={
+                "authorization": _FAST2SMS_API_KEY,
+                "route":         "q",
+                "message":       body,
+                "language":      "english",
+                "flash":         "0",
+                "numbers":       _ALERT_PHONE_NUMBER,
+            },
+            timeout=10,   # seconds — prevents a slow API call from stalling the stream
+        )
+
+        # Fast2SMS always returns 200; success/failure is in the JSON body.
+        result = response.json()
+        if result.get("return") is True:
+            request_id = result.get("request_id", "n/a")
+            print(f"[notifier] Fast2SMS sent successfully (request_id: {request_id})")
+        else:
+            reason = result.get("message", repr(result))
+            print(f"[notifier] Fast2SMS failed: Fast2SMS returned failure — {reason}")
+
+    except Exception as exc:
+        # Generic failure (network error, JSON parse error, etc.).
+        # Never raise — caller must remain unaffected by SMS issues.
+        print(f"[notifier] Fast2SMS alert failed: {type(exc).__name__} — {str(exc)[:120]}")
+
+
+# ---------------------------------------------------------------------------
+# log_alert — console output + multi-channel notification for confirmed High transitions
 # ---------------------------------------------------------------------------
 
 def log_alert(event: dict) -> None:
     """
     Print a formatted alert line to stdout for a confirmed High transition,
-    then attempt to send an SMS via send_sms_alert().
+    then attempt to dispatch alerts across all configured channels
+    (Telegram via send_sms_alert, Fast2SMS via send_fast2sms_alert).
 
-    The SMS call is wrapped in its own try/except so any SMS failure can
-    never silence or break the console log that was already working.
+    Each alert call is wrapped in its own independent try/except so any
+    failure in one channel can never affect another channel or silence the
+    console log that was already working.
 
     Uses event["timestamp"] and event["confidence"] from the 5-field
     detection contract.  Wrapped in try/except so a malformed or incomplete
@@ -231,11 +331,18 @@ def log_alert(event: dict) -> None:
         print(f"🔥 ALERT: severity transitioned to HIGH "
               f"(could not format event details: {exc!r})")
 
-    # SMS dispatch — isolated so it can never affect the console log above.
+    # Telegram dispatch — isolated so it can never affect console log or SMS.
     try:
         send_sms_alert(event)
     except Exception as exc:
         print(f"[notifier] Unexpected error in send_sms_alert: {exc!r}")
+
+    # Fast2SMS dispatch — isolated so it can never affect console log or Telegram.
+    try:
+        send_fast2sms_alert(event)
+    except Exception as exc:
+        print(f"[notifier] Unexpected error in send_fast2sms_alert: {exc!r}")
+
 
 
 # ---------------------------------------------------------------------------
