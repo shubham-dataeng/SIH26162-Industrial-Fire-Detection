@@ -50,3 +50,4 @@ urllib3==2.7.0
 Werkzeug==3.1.8
 # Alerting — python-dotenv loads .env credentials for Telegram & Fast2SMS (B5 notifier)
 python-dotenv==1.2.3
+reportlab==5.0.1

@@ -5,3 +5,4 @@ datasets/
 *.pt
 *.db
 backend/database/snapshots/
+backend/database/reports/

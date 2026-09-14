@@ -420,6 +420,7 @@ header h1 {
 .event-entry.severity-medium .event-class { color: var(--clr-medium-text); }
 .event-entry.severity-high   .event-class { color: var(--clr-high-text);   }
 
+
 /* --------------------------------------------------------------------------
    Footer
    -------------------------------------------------------------------------- */

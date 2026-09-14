@@ -26,12 +26,13 @@ INTEGRATION (Phase 8):
     }
 
 Routes:
-  GET  /                   — Dashboard shell (frontend/index.html)
-  GET  /video_feed         — MJPEG stream with real/mock overlays
-  GET  /latest_detection   — Single detection JSON from shared _latest_state
-  GET  /events             — 20 most recent persisted events
-  POST /switch_video       — Hot-swap active video source ({"video": "N.mp4"})
-  GET  /snapshots/<fname>  — Serve saved alert snapshot image
+  GET  /                     — Dashboard shell (frontend/index.html)
+  GET  /video_feed           — MJPEG stream with real/mock overlays
+  GET  /latest_detection     — Single detection JSON from shared _latest_state
+  GET  /events               — 20 most recent persisted events
+  POST /switch_video         — Hot-swap active video source ({"video": "N.mp4"})
+  GET  /snapshots/<fname>    — Serve saved alert snapshot image
+  GET  /incident_report/<id> — Serve generated incident report PDF for event
 """
 
 import os
@@ -42,7 +43,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 # ---------------------------------------------------------------------------
@@ -54,9 +55,10 @@ _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
-from database.db import get_recent_events, insert_event  # noqa: E402
+from database.db import get_event_by_id, get_recent_events, insert_event  # noqa: E402
 # Reusing the same _BACKEND_DIR sys.path pattern established in B4:
 from alerts.notifier import log_alert, maybe_alert  # noqa: E402
+from report_generator import generate_incident_report  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # STEP 1 — Safe import of the real AI pipeline with startup fallback.
@@ -88,6 +90,12 @@ _SNAPSHOTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "database", "snapshots")
 )
 os.makedirs(_SNAPSHOTS_DIR, exist_ok=True)
+
+_REPORTS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "database", "reports")
+)
+os.makedirs(_REPORTS_DIR, exist_ok=True)
+
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -454,22 +462,24 @@ def generate_frames():
                             0.7, color, 2,
                         )
 
-                # ---- STEP 4/5: Alert notifier & snapshot capture -----------
+                # ---- STEP 4/5: Alert notifier, snapshot & report generation ---
                 # maybe_alert() needs the worst severity across ALL detections
                 # so it correctly sees "None" on empty frames (latch reset).
                 # Independent try/except — a notifier failure cannot affect
                 # DB logging or the video stream (B5 pattern preserved).
                 snapshot_filename: str | None = None
+                report_filename: str | None = None
                 primary_det = None
 
                 try:
                     frame_severity = overall_severity(detections)
                     if maybe_alert(frame_severity):
                         primary_det = pick_primary_detection(detections)
+                        ts_safe = datetime.now().isoformat().replace(":", "-")
 
-                        # Capture and save annotated frame snapshot
+                        # 1. Capture and save annotated frame snapshot
+                        snapshot_full_path = None
                         try:
-                            ts_safe = datetime.now().isoformat().replace(":", "-")
                             snapshot_filename = f"snapshot_{ts_safe}.jpg"
                             snapshot_full_path = os.path.join(_SNAPSHOTS_DIR, snapshot_filename)
                             cv2.imwrite(snapshot_full_path, frame)
@@ -479,8 +489,31 @@ def generate_frames():
                                 f"(alert continues): {snap_exc!r}"
                             )
                             snapshot_filename = None
+                            snapshot_full_path = None
 
-                        log_alert(primary_det)
+                        # 2. Generate PDF incident report in its own try/except
+                        report_full_path = None
+                        try:
+                            report_filename = f"report_{ts_safe}.pdf"
+                            report_full_path = os.path.join(_REPORTS_DIR, report_filename)
+                            res = generate_incident_report(
+                                event=primary_det,
+                                output_pdf_path=report_full_path,
+                                snapshot_image_path=snapshot_full_path,
+                            )
+                            if not res:
+                                report_filename = None
+                                report_full_path = None
+                        except Exception as pdf_exc:
+                            print(
+                                f"[generate_frames] Report generation failed "
+                                f"(alert continues): {pdf_exc!r}"
+                            )
+                            report_filename = None
+                            report_full_path = None
+
+                        # 3. Dispatch alert with optional report PDF attached
+                        log_alert(primary_det, report_path=report_full_path)
                 except Exception as alert_exc:
                     print(
                         f"[generate_frames] Notifier raised unexpectedly "
@@ -488,18 +521,21 @@ def generate_frames():
                     )
 
                 # ---- DB persistence (B4 pattern) ---------------------------
-                # For each detection, persist to DB. If a snapshot was captured
-                # on this High-severity transition, associate snapshot_filename
-                # ONLY with the primary detection (other detections get None).
+                # For each detection, persist to DB. If a snapshot/report was captured
+                # on this High-severity transition, associate paths ONLY with the
+                # primary detection (other detections get None).
                 for det in detections:
                     try:
-                        det_snap = snapshot_filename if (snapshot_filename and det is primary_det) else None
-                        insert_event(det, snapshot_path=det_snap)
+                        is_primary = (det is primary_det)
+                        det_snap = snapshot_filename if (snapshot_filename and is_primary) else None
+                        det_rep = report_filename if (report_filename and is_primary) else None
+                        insert_event(det, snapshot_path=det_snap, report_path=det_rep)
                     except Exception as db_exc:
                         print(
                             f"[generate_frames] insert_event raised unexpectedly "
                             f"(stream continues): {db_exc!r}"
                         )
+
 
             except Exception as frame_exc:
                 # Outer guard: any unhandled error in the detection/draw block
@@ -701,6 +737,34 @@ def get_snapshot(filename: str):
     if not os.path.isfile(file_path):
         return jsonify({"error": "Snapshot not found"}), 404
     return send_from_directory(_SNAPSHOTS_DIR, safe_filename)
+
+
+@app.route("/incident_report/<int:event_id>")
+def incident_report(event_id: int):
+    """
+    On-demand download route for incident report PDF by event ID.
+    Looks up the event in SQLite, checks report_path, and serves via send_file.
+    """
+    event = get_event_by_id(event_id)
+    if not event:
+        return jsonify({"error": "Event not found"}), 404
+
+    report_path = event.get("report_path")
+    if not report_path:
+        return jsonify({"error": "No incident report available for this event"}), 404
+
+    safe_report = os.path.basename(report_path)
+    full_path = os.path.join(_REPORTS_DIR, safe_report)
+    if not os.path.isfile(full_path):
+        return jsonify({"error": "Report file not found on disk"}), 404
+
+    return send_file(
+        full_path,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=safe_report,
+    )
+
 
 
 

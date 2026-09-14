@@ -10,13 +10,17 @@ Provides three functions consumed by backend/app.py's generate_frames():
       multiple browser tabs cannot both fire a spurious alert for the same
       transition event.
 
-  log_alert(event)
+  log_alert(event, report_path=None)
       Prints a single formatted console line for every confirmed High
       transition and dispatches alerts via all configured channels
-      (Telegram Bot and/or Fast2SMS SMS).
+      (Telegram Bot message, optional Telegram document attachment, and/or Fast2SMS SMS).
       Failure-isolated: a malformed event dict or failure in any notification
       channel never raises, never affects the other channel, and never breaks
       the console log.
+
+  send_telegram_document(file_path, caption=None)
+      Sends a file (e.g. incident report PDF) as a Telegram document attachment.
+      Failure-isolated: never raises.
 
   send_email_alert(event)
       STUB ONLY — intentional no-op placeholder for a future optional
@@ -300,14 +304,63 @@ def send_fast2sms_alert(event: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# send_telegram_document — send file via Telegram Bot sendDocument API
+# ---------------------------------------------------------------------------
+
+def send_telegram_document(file_path: str, caption: str | None = None) -> None:
+    """
+    Send a document (e.g. PDF incident report) via Telegram Bot API.
+
+    No-ops immediately if SMS_CONFIGURED (Telegram) is False or file does not exist.
+    Uses a 20-second timeout to accommodate file uploads.
+    Must never raise — any exception is caught and printed so callers are not disrupted.
+    """
+    if not SMS_CONFIGURED:
+        return
+
+    if not file_path or not os.path.isfile(file_path):
+        print(f"[notifier] Telegram document skipped — file not found: {file_path!r}")
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/sendDocument"
+        data = {"chat_id": _TELEGRAM_CHAT_ID}
+        if caption:
+            data["caption"] = caption
+
+        filename = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            files = {"document": (filename, f, "application/pdf")}
+            response = _requests.post(
+                url,
+                data=data,
+                files=files,
+                timeout=20,  # 20s timeout for document upload
+            )
+
+        result = response.json()
+        if result.get("ok") is True:
+            message_id = result.get("result", {}).get("message_id", "n/a")
+            print(f"[notifier] Telegram document sent successfully (message_id: {message_id})")
+        else:
+            reason = result.get("description", repr(result))
+            print(f"[notifier] Telegram document failed: {reason}")
+
+    except Exception as exc:
+        print(f"[notifier] Telegram document upload failed: {type(exc).__name__} — {str(exc)[:120]}")
+
+
+# ---------------------------------------------------------------------------
 # log_alert — console output + multi-channel notification for confirmed High transitions
 # ---------------------------------------------------------------------------
 
-def log_alert(event: dict) -> None:
+def log_alert(event: dict, report_path: str | None = None) -> None:
     """
     Print a formatted alert line to stdout for a confirmed High transition,
-    then attempt to dispatch alerts across all configured channels
-    (Telegram via send_sms_alert, Fast2SMS via send_fast2sms_alert).
+    then attempt to dispatch alerts across all configured channels:
+      1. Telegram text message via send_sms_alert()
+      2. Telegram document attachment via send_telegram_document() if report_path provided
+      3. Fast2SMS SMS via send_fast2sms_alert()
 
     Each alert call is wrapped in its own independent try/except so any
     failure in one channel can never affect another channel or silence the
@@ -331,11 +384,25 @@ def log_alert(event: dict) -> None:
         print(f"🔥 ALERT: severity transitioned to HIGH "
               f"(could not format event details: {exc!r})")
 
-    # Telegram dispatch — isolated so it can never affect console log or SMS.
+    # Telegram text message dispatch — isolated so it can never affect console log or others.
     try:
         send_sms_alert(event)
     except Exception as exc:
         print(f"[notifier] Unexpected error in send_sms_alert: {exc!r}")
+
+    # Telegram document dispatch — isolated so it cannot affect text alerts or Fast2SMS.
+    if report_path:
+        try:
+            confidence = float(event.get("confidence", 0))
+            timestamp  = event.get("timestamp", "unknown")
+            caption = (
+                f"🔥 FIRE ALERT REPORT - SIH26162\n"
+                f"Severity: HIGH | Confidence: {confidence * 100:.0f}%\n"
+                f"Time: {timestamp}"
+            )
+            send_telegram_document(report_path, caption=caption)
+        except Exception as exc:
+            print(f"[notifier] Unexpected error in send_telegram_document: {exc!r}")
 
     # Fast2SMS dispatch — isolated so it can never affect console log or Telegram.
     try:

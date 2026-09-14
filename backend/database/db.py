@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS events (
     class         TEXT    NOT NULL,
     confidence    REAL    NOT NULL,
     severity      TEXT    NOT NULL,
-    snapshot_path TEXT
+    snapshot_path TEXT,
+    report_path   TEXT
 );
 """
 
@@ -58,10 +59,10 @@ CREATE TABLE IF NOT EXISTS events (
 def init_db() -> None:
     """
     Create the events table if it does not already exist, and ensure
-    snapshot_path column is present for existing databases.
+    snapshot_path and report_path columns are present for existing databases.
 
     Opens its own connection, runs CREATE TABLE IF NOT EXISTS (fully
-    idempotent), verifies/adds the snapshot_path column, commits, and
+    idempotent), verifies/adds the snapshot_path and report_path columns, commits, and
     immediately closes.  Safe to call at import time and safe to call again
     on every app restart.
     """
@@ -69,23 +70,29 @@ def init_db() -> None:
     try:
         conn.execute(_CREATE_TABLE_SQL)
 
-        # Migration helper: Check if snapshot_path column exists in an already created events table
+        # Migration helper: Check if columns exist in an already created events table
         cursor = conn.execute("PRAGMA table_info(events)")
         columns = [row[1] for row in cursor.fetchall()]
         if "snapshot_path" not in columns:
             conn.execute("ALTER TABLE events ADD COLUMN snapshot_path TEXT")
+        if "report_path" not in columns:
+            conn.execute("ALTER TABLE events ADD COLUMN report_path TEXT")
 
         conn.commit()
     finally:
         conn.close()
 
 
-def insert_event(event: dict, snapshot_path: str | None = None) -> None:
+def insert_event(
+    event: dict,
+    snapshot_path: str | None = None,
+    report_path: str | None = None,
+) -> None:
     """
     Persist one detection event to the database.
 
     Only "timestamp", "class", "confidence", "severity", and optional
-    "snapshot_path" are stored.
+    "snapshot_path" / "report_path" are stored.
     "bbox" is intentionally omitted from the schema — it is already rendered
     live on the video stream overlay and does not need to be queryable.
 
@@ -102,17 +109,19 @@ def insert_event(event: dict, snapshot_path: str | None = None) -> None:
     try:
         conn = sqlite3.connect(DB_PATH)
         try:
-            # Check if snapshot_path was passed as arg or in event dict
+            # Check if paths were passed as args or in event dict
             snap = snapshot_path if snapshot_path is not None else event.get("snapshot_path")
+            rep = report_path if report_path is not None else event.get("report_path")
             conn.execute(
-                "INSERT INTO events (timestamp, class, confidence, severity, snapshot_path) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO events (timestamp, class, confidence, severity, snapshot_path, report_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     event["timestamp"],
                     event["class"],
                     float(event["confidence"]),
                     event["severity"],
                     snap,
+                    rep,
                 ),
             )
             conn.commit()
@@ -128,7 +137,8 @@ def get_recent_events(limit: int = 20) -> list:
     """
     Return the `limit` most recently inserted events as a list of dicts.
 
-    Each dict has keys: "id", "timestamp", "class", "confidence", "severity", "snapshot_path".
+    Each dict has keys: "id", "timestamp", "class", "confidence", "severity",
+    "snapshot_path", "report_path".
     Returns an empty list on any failure (query errors must not 500 the caller).
 
     Row ordering: id DESC ensures newest-first; the caller can reverse if needed.
@@ -138,7 +148,7 @@ def get_recent_events(limit: int = 20) -> list:
         conn.row_factory = sqlite3.Row  # enables dict-style column access
         try:
             cursor = conn.execute(
-                "SELECT id, timestamp, class, confidence, severity, snapshot_path "
+                "SELECT id, timestamp, class, confidence, severity, snapshot_path, report_path "
                 "FROM events "
                 "ORDER BY id DESC "
                 "LIMIT ?",
@@ -157,6 +167,7 @@ def get_recent_events(limit: int = 20) -> list:
                 "confidence":    row["confidence"],
                 "severity":      row["severity"],
                 "snapshot_path": row["snapshot_path"],
+                "report_path":   row["report_path"],
             }
             for row in rows
         ]
@@ -165,9 +176,44 @@ def get_recent_events(limit: int = 20) -> list:
         return []
 
 
+def get_event_by_id(event_id: int) -> dict | None:
+    """
+    Look up a single event row by its primary key ID.
+    Returns dict if found, None otherwise or on error.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT id, timestamp, class, confidence, severity, snapshot_path, report_path "
+                "FROM events "
+                "WHERE id = ?",
+                (event_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "id":            row["id"],
+                "timestamp":     row["timestamp"],
+                "class":         row["class"],
+                "confidence":    row["confidence"],
+                "severity":      row["severity"],
+                "snapshot_path": row["snapshot_path"],
+                "report_path":   row["report_path"],
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"[db.get_event_by_id] Query failed: {exc!r}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Module-level initialisation — runs once on first import.
 # Guarantees the table exists before any insert_event() call is made,
 # regardless of which thread or route triggers the first import.
 # ---------------------------------------------------------------------------
 init_db()
+

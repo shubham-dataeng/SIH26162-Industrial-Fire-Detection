@@ -151,6 +151,8 @@ function addEventEntry(data) {
   }
 }
 
+
+
 /* ==========================================================================
    Core poll handler — called with parsed JSON on each successful fetch.
    ========================================================================== */
@@ -213,12 +215,48 @@ function startPolling() {
 }
 
 /* ==========================================================================
+   Fetch initial recent events from /events to populate the list on load
+   ========================================================================== */
+async function loadRecentEvents() {
+  try {
+    const res = await fetch("/events");
+    if (!res.ok) return;
+    const events = await res.json();
+    if (Array.isArray(events) && events.length > 0) {
+      // events are ordered id DESC (newest first). Add oldest first so newest is at top.
+      const reversed = [...events].reverse();
+      for (const ev of reversed) {
+        addEventEntry(ev);
+      }
+
+      // Sync state with loaded historical events:
+      // 1. Session count reflects visible loaded event entries.
+      sessionCount = events.length;
+      if (detectionCounter) {
+        detectionCounter.textContent = sessionCount;
+      }
+
+      // 2. lastTimestamp set to the most recent event (events[0], since ordered id DESC)
+      // so live polling does not double-count or re-log the same reading.
+      if (events[0] && events[0].timestamp) {
+        lastTimestamp = events[0].timestamp;
+      }
+    }
+  } catch (err) {
+    console.warn("[dashboard] Failed to load initial events from /events:", err);
+  }
+}
+
+
+/* ==========================================================================
    Entry point
    ========================================================================== */
 document.addEventListener("DOMContentLoaded", () => {
+  loadRecentEvents();
   startPolling();
   initVideoSwitcher();
 });
+
 
 /* ==========================================================================
    Video-source switcher
