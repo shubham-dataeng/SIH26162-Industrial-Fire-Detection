@@ -3,88 +3,169 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Industrial Fire Detection Dashboard</title>
+    <title>SIH26162 — Industrial Fire Detection Mission Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <header>
-      <h1>🔥 SIH26162 — Industrial Fire Detection Dashboard</h1>
-      <p class="subtitle">AI-powered real-time monitoring system</p>
+    <!-- Ambient background grid and tactical scanlines -->
+    <div class="hud-background" aria-hidden="true"></div>
+
+    <header class="soc-header">
+      <div class="header-left">
+        <div class="system-tag">
+          <span class="system-beacon"></span>
+          <span class="system-code">SYSTEM ID: SIH-26162</span>
+        </div>
+        <h1>INDUSTRIAL FIRE MONITORING CORE</h1>
+        <p class="subtitle">AUTOMATED REAL-TIME SURVEILLANCE &amp; THREAT ANALYSIS</p>
+      </div>
+      <div class="header-right">
+        <div class="header-telemetry">
+          <span class="telem-label">OPERATIONAL STATUS</span>
+          <span class="telem-val">ONLINE // ACTIVE</span>
+        </div>
+      </div>
     </header>
 
     <main class="dashboard-grid">
-
-      <!-- LEFT: Video panel -->
+      <!-- LEFT: Video Surveillance panel -->
       <section class="panel video-panel" aria-label="Live video feed">
-        <h2>Live Feed</h2>
+        <div class="panel-header">
+          <div class="panel-title-wrap">
+            <span class="panel-icon">⬢</span>
+            <h2>OPTICAL SURVEILLANCE FEED</h2>
+          </div>
+          <span class="cam-badge"><span class="rec-dot"></span> LIVE // STREAM</span>
+        </div>
 
         <!-- Video source switcher — buttons POST to /switch_video -->
         <div class="video-switcher" role="group" aria-label="Video source">
-          <span class="label">Video Source</span>
+          <div class="switcher-header">
+            <span class="label">OPTICAL CHANNEL SELECTOR</span>
+            <span id="switcher-status" class="switcher-status" aria-live="polite"></span>
+          </div>
           <div class="switcher-buttons">
             <button class="switcher-btn active" data-video="1.mp4" aria-pressed="true">
-              🔥 Fire Test
+              <span class="btn-indicator"></span>🔥 Channel 01: Fire Test
             </button>
             <button class="switcher-btn" data-video="2.mp4" aria-pressed="false">
-              🍳 Cooking Fire
+              <span class="btn-indicator"></span>🍳 Channel 02: Cooking Fire
             </button>
             <button class="switcher-btn" data-video="3.mp4" aria-pressed="false">
-              🌅 No Fire (Sunset)
+              <span class="btn-indicator"></span>🌅 Channel 03: Sunset Normal
             </button>
           </div>
-          <span id="switcher-status" class="switcher-status" aria-live="polite"></span>
         </div>
 
-        <div class="video-wrapper">
-          <img
-            id="video-feed"
-            src="/video_feed"
-            alt="Live camera feed — MJPEG stream"
-          />
+        <div class="video-container">
+          <!-- Tactical HUD corner brackets -->
+          <span class="hud-corner top-left" aria-hidden="true"></span>
+          <span class="hud-corner top-right" aria-hidden="true"></span>
+          <span class="hud-corner bottom-left" aria-hidden="true"></span>
+          <span class="hud-corner bottom-right" aria-hidden="true"></span>
+          <div class="hud-overlay-grid" aria-hidden="true"></div>
+
+          <div class="video-wrapper">
+            <img
+              id="video-feed"
+              src="/video_feed"
+              alt="Live camera feed — MJPEG stream"
+            />
+          </div>
         </div>
       </section>
 
-
-      <!-- RIGHT: Status panel -->
+      <!-- RIGHT: Status & Telemetry panel -->
       <section class="panel status-panel" aria-label="Detection status">
-        <h2>Detection Status</h2>
+        <div class="panel-header">
+          <div class="panel-title-wrap">
+            <span class="panel-icon">⬢</span>
+            <h2>THREAT ASSESSMENT TELEMETRY</h2>
+          </div>
+          <span class="telemetry-badge">SEV-ANALYSIS</span>
+        </div>
 
-        <!-- Severity badge -->
-        <div class="status-block">
-          <span class="label">Current Severity</span>
-          <div id="severity-badge" class="severity-none">No Detection</div>
-          <div id="pipeline-status" class="pipeline-status hidden" role="status">
-            <span class="pipeline-status-icon">⚠</span>
-            <span class="pipeline-status-text">Running on fallback detection (AI module offline)</span>
+        <!-- Critical Alert banner (toggled by script.js via .hidden) -->
+        <div id="alert-banner" class="alert-banner hidden" role="alert" aria-live="assertive">
+          <div class="alert-pulse-ring" aria-hidden="true"></div>
+          <span class="alert-icon">⚠</span>
+          <div class="alert-info">
+            <span class="alert-tag">CRITICAL PROTOCOL TRIGGERED</span>
+            <span class="alert-text">HIGH SEVERITY ALERT</span>
           </div>
         </div>
 
+        <!-- Status & Counter Cards -->
+        <div class="metrics-row">
+          <!-- Severity badge card -->
+          <div class="status-block severity-card">
+            <span class="label">CURRENT THREAT LEVEL</span>
+            <div id="severity-badge" class="severity-none">No Detection</div>
+            <div id="pipeline-status" class="pipeline-status hidden" role="status">
+              <span class="pipeline-status-icon">⚠</span>
+              <span class="pipeline-status-text">Fallback detection active (AI module offline)</span>
+            </div>
+          </div>
 
-        <!-- Alert banner (hidden by default) -->
-        <div id="alert-banner" class="alert-banner hidden" role="alert" aria-live="assertive">
-          <span class="alert-icon">🔥</span>
-          <span class="alert-text">HIGH SEVERITY ALERT</span>
+          <!-- Session detection counter card -->
+          <div class="status-block counter-card">
+            <span class="label">SESSION DETECTIONS</span>
+            <div class="counter-display">
+              <div id="detection-counter" class="counter">0</div>
+              <span class="counter-unit">EVENTS</span>
+            </div>
+          </div>
         </div>
 
-        <!-- Session detection counter -->
-        <div class="status-block">
-          <span class="label">Detections This Session</span>
-          <div id="detection-counter" class="counter">0</div>
-        </div>
-
-        <!-- Scrollable event log -->
+        <!-- Live Incident Log Stream -->
         <div class="event-log-section">
-          <h3>Recent Events</h3>
-          <ol id="event-list" class="event-list" aria-label="Recent detection events">
-            <!-- Entries prepended by script.js -->
+          <div class="event-log-header">
+            <div class="event-log-title">
+              <span class="live-dot"></span>
+              <h3>LIVE INCIDENT STREAM</h3>
+            </div>
+            <span class="log-capacity">MAX: 20 IN SESSION</span>
+          </div>
+          <ol id="event-list" class="event-list" aria-label="Live detection events this session">
+            <!-- Entries prepended live by script.js addEventEntry() -->
           </ol>
         </div>
+      </section>
 
+      <!-- FULL WIDTH BOTTOM: Historical Database Archive panel -->
+      <section class="panel history-panel" aria-label="Archived detection events">
+        <div class="panel-header">
+          <div class="panel-title-wrap">
+            <span class="panel-icon">⏳</span>
+            <h2>ARCHIVED INCIDENT RECORDS</h2>
+          </div>
+          <span class="history-badge">DATABASE ARCHIVE</span>
+        </div>
+
+        <div class="history-log-section">
+          <ol id="history-list" class="event-list history-list" aria-label="Historical incident records from database">
+            <!-- Loaded once on startup from /events by loadRecentEvents() -->
+          </ol>
+        </div>
       </section>
     </main>
 
-    <footer>
-      <p>Polling <code>/latest_detection</code> every 1 s &nbsp;|&nbsp; Module B3 — Developer B</p>
+    <footer class="soc-footer">
+      <div class="footer-segment">
+        <span class="footer-dot"></span> TELEMETRY POLLING: <code>/latest_detection</code> [1000ms]
+      </div>
+      <div class="footer-segment">
+        AI CORE: YOLOv8 + DUAL PERSISTENCE SEVERITY PIPELINE
+      </div>
+      <div class="footer-segment">
+        SIH26162 TACTICAL MONITORING SUITE
+      </div>
     </footer>
 
     <script src="/static/script.js" defer></script>

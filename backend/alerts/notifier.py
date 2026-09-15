@@ -203,11 +203,13 @@ def send_sms_alert(event: dict) -> None:
         timestamp  = event.get("timestamp", "unknown")
 
         body = (
-            f"🔥 FIRE ALERT - SIH26162\n"
-            f"Severity: HIGH\n"
-            f"Confidence: {confidence * 100:.0f}%\n"
-            f"Time: {timestamp}\n"
-            f"Action Required: Evacuate and contact emergency services."
+            f"🚨 <b>CRITICAL FIRE ALERT — SIH26162</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔥 <b>Severity:</b> HIGH\n"
+            f"📊 <b>Confidence:</b> {confidence * 100:.0f}%\n"
+            f"📍 <b>Time:</b> <code>{timestamp}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Action Required:</b> Evacuate and contact emergency services immediately."
         )
 
         # Telegram Bot API — sendMessage endpoint.
@@ -218,8 +220,9 @@ def send_sms_alert(event: dict) -> None:
         response = _requests.post(
             url,
             json={
-                "chat_id": _TELEGRAM_CHAT_ID,
-                "text":    body,
+                "chat_id":    _TELEGRAM_CHAT_ID,
+                "text":       body,
+                "parse_mode": "HTML",
             },
             timeout=10,   # seconds — prevents a slow API call from stalling the stream
         )
@@ -266,11 +269,11 @@ def send_fast2sms_alert(event: dict) -> None:
         timestamp  = event.get("timestamp", "unknown")
 
         body = (
-            f"🔥 FIRE ALERT - SIH26162\n"
+            f"🚨 FIRE ALERT - SIH26162\n"
             f"Severity: HIGH\n"
             f"Confidence: {confidence * 100:.0f}%\n"
             f"Time: {timestamp}\n"
-            f"Action Required: Evacuate and contact emergency services."
+            f"Action: Evacuate and contact emergency services immediately."
         )
 
         # Fast2SMS Quick SMS route — params passed as a dict, not query-string
@@ -324,7 +327,7 @@ def send_telegram_document(file_path: str, caption: str | None = None) -> None:
 
     try:
         url = f"https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/sendDocument"
-        data = {"chat_id": _TELEGRAM_CHAT_ID}
+        data = {"chat_id": _TELEGRAM_CHAT_ID, "parse_mode": "HTML"}
         if caption:
             data["caption"] = caption
 
@@ -396,9 +399,9 @@ def log_alert(event: dict, report_path: str | None = None) -> None:
             confidence = float(event.get("confidence", 0))
             timestamp  = event.get("timestamp", "unknown")
             caption = (
-                f"🔥 FIRE ALERT REPORT - SIH26162\n"
-                f"Severity: HIGH | Confidence: {confidence * 100:.0f}%\n"
-                f"Time: {timestamp}"
+                f"🚨 <b>FIRE INCIDENT REPORT — SIH26162</b>\n"
+                f"🔥 <b>Severity:</b> HIGH | 📊 <b>Confidence:</b> {confidence * 100:.0f}%\n"
+                f"📍 <b>Time:</b> <code>{timestamp}</code>"
             )
             send_telegram_document(report_path, caption=caption)
         except Exception as exc:

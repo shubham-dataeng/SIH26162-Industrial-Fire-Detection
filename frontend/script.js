@@ -21,6 +21,7 @@ const pipelineStatus   = document.getElementById("pipeline-status");
 const alertBanner      = document.getElementById("alert-banner");
 const detectionCounter = document.getElementById("detection-counter");
 const eventList        = document.getElementById("event-list");
+const historyList      = document.getElementById("history-list");
 
 
 /* ==========================================================================
@@ -151,6 +152,34 @@ function addEventEntry(data) {
   }
 }
 
+/* ==========================================================================
+   Append an entry to the historical archive list (#history-list).
+   ========================================================================== */
+function addHistoryEntry(data) {
+  if (!historyList) return;
+
+  let timeDisplay;
+  try {
+    const d = new Date(data.timestamp);
+    timeDisplay = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch (_) {
+    timeDisplay = data.timestamp;
+  }
+
+  const severityClass = SEVERITY_CLASS[data.severity] || "severity-none";
+  const confidencePct = (parseFloat(data.confidence) * 100).toFixed(1);
+
+  const li = document.createElement("li");
+  li.className = `event-entry history-entry ${severityClass}`;
+  li.innerHTML =
+    `<span class="event-time">${timeDisplay}</span>` +
+    `<span class="event-class">${data.class}</span>` +
+    `<span class="event-sev">${data.severity}</span>` +
+    `<span class="event-confidence">${confidencePct}%</span>`;
+
+  historyList.appendChild(li);
+}
+
 
 
 /* ==========================================================================
@@ -215,35 +244,33 @@ function startPolling() {
 }
 
 /* ==========================================================================
-   Fetch initial recent events from /events to populate the list on load
+   Fetch historical incident records from /events to populate #history-list
    ========================================================================== */
 async function loadRecentEvents() {
+  if (!historyList) return;
+
   try {
     const res = await fetch("/events");
     if (!res.ok) return;
     const events = await res.json();
-    if (Array.isArray(events) && events.length > 0) {
-      // events are ordered id DESC (newest first). Add oldest first so newest is at top.
-      const reversed = [...events].reverse();
-      for (const ev of reversed) {
-        addEventEntry(ev);
+    if (Array.isArray(events)) {
+      historyList.innerHTML = "";
+      if (events.length === 0) {
+        const emptyLi = document.createElement("li");
+        emptyLi.className = "history-empty";
+        emptyLi.textContent = "NO PRIOR INCIDENT RECORDS FOUND IN DATABASE";
+        historyList.appendChild(emptyLi);
+        return;
       }
 
-      // Sync state with loaded historical events:
-      // 1. Session count reflects visible loaded event entries.
-      sessionCount = events.length;
-      if (detectionCounter) {
-        detectionCounter.textContent = sessionCount;
-      }
-
-      // 2. lastTimestamp set to the most recent event (events[0], since ordered id DESC)
-      // so live polling does not double-count or re-log the same reading.
-      if (events[0] && events[0].timestamp) {
-        lastTimestamp = events[0].timestamp;
+      // events are returned ordered id DESC (newest first).
+      // Append in that order so newest is at the top of the history archive.
+      for (const ev of events) {
+        addHistoryEntry(ev);
       }
     }
   } catch (err) {
-    console.warn("[dashboard] Failed to load initial events from /events:", err);
+    console.warn("[dashboard] Failed to load archived events from /events:", err);
   }
 }
 
