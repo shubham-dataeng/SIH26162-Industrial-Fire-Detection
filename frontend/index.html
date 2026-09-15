@@ -52,13 +52,13 @@
           </div>
           <div class="switcher-buttons">
             <button class="switcher-btn active" data-video="1.mp4" aria-pressed="true">
-              <span class="btn-indicator"></span>🔥 Channel 01: Fire Test
+              <span class="btn-indicator"></span>CHANNEL 01
             </button>
             <button class="switcher-btn" data-video="2.mp4" aria-pressed="false">
-              <span class="btn-indicator"></span>🍳 Channel 02: Cooking Fire
+              <span class="btn-indicator"></span>CHANNEL 02
             </button>
             <button class="switcher-btn" data-video="3.mp4" aria-pressed="false">
-              <span class="btn-indicator"></span>🌅 Channel 03: Sunset Normal
+              <span class="btn-indicator"></span>CHANNEL 03
             </button>
           </div>
         </div>
@@ -145,13 +145,26 @@
             <span class="panel-icon">⏳</span>
             <h2>ARCHIVED INCIDENT RECORDS</h2>
           </div>
-          <span class="history-badge">DATABASE ARCHIVE</span>
+          <div class="history-header-right">
+            <span class="history-badge">DATABASE ARCHIVE</span>
+            <button
+              id="history-toggle-btn"
+              class="history-toggle-btn"
+              aria-expanded="false"
+              aria-controls="history-body"
+              title="Expand / Collapse archive"
+            >
+              <span class="toggle-chevron">▾</span>
+            </button>
+          </div>
         </div>
 
-        <div class="history-log-section">
-          <ol id="history-list" class="event-list history-list" aria-label="Historical incident records from database">
-            <!-- Loaded once on startup from /events by loadRecentEvents() -->
-          </ol>
+        <div id="history-body" class="history-body collapsed">
+          <div class="history-log-section">
+            <ol id="history-list" class="event-list history-list" aria-label="Historical incident records from database">
+              <!-- Loaded once on startup from /events by loadRecentEvents() -->
+            </ol>
+          </div>
         </div>
       </section>
     </main>

@@ -282,7 +282,23 @@ document.addEventListener("DOMContentLoaded", () => {
   loadRecentEvents();
   startPolling();
   initVideoSwitcher();
+  initHistoryToggle();
 });
+
+
+/* ==========================================================================
+   History archive panel — collapse / expand toggle
+   ========================================================================== */
+function initHistoryToggle() {
+  const btn  = document.getElementById("history-toggle-btn");
+  const body = document.getElementById("history-body");
+  if (!btn || !body) return;
+
+  btn.addEventListener("click", () => {
+    const isCollapsed = body.classList.toggle("collapsed");
+    btn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+  });
+}
 
 
 /* ==========================================================================
